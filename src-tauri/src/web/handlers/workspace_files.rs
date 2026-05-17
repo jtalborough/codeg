@@ -15,8 +15,8 @@
 //! workspace cannot redirect reads or writes outside it.
 
 use std::collections::BTreeMap;
-use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use axum::body::{Body, Bytes};
 use axum::extract::Multipart;
@@ -26,6 +26,7 @@ use axum::Json;
 use futures::stream;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 
 use crate::app_error::{AppCommandError, UPLOAD_I18N_KEY_TOO_LARGE};
 
@@ -37,16 +38,21 @@ const WORKSPACE_UPLOAD_DEFAULT_MAX_BYTES: u64 = 500 * 1024 * 1024;
 const WORKSPACE_UPLOAD_MAX_BYTES_ENV: &str = "CODEG_WORKSPACE_UPLOAD_MAX_BYTES";
 
 /// Cap on the uncompressed source bytes scanned for a directory ZIP
-/// download. The current implementation buffers the entire archive in
-/// memory inside `spawn_blocking`, so without a bound a single request
-/// for the workspace root on a sizable repo would spike RSS by
-/// gigabytes and could trivially OOM the server under concurrency.
-/// Streaming the archive is the right long-term fix (issue #179
-/// follow-up); until then this cap keeps memory bounded. Operators can
-/// raise it via `CODEG_WORKSPACE_DOWNLOAD_MAX_BYTES` for genuinely
-/// larger workspaces.
-const WORKSPACE_DOWNLOAD_DEFAULT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+/// download. The archive is buffered to a temp file on disk (not RAM)
+/// before streaming, so this cap mostly protects against runaway disk
+/// usage and walk time under concurrency rather than RSS. Lowered from
+/// 1 GiB to 256 MiB to fit ordinary remote-server hosts; operators with
+/// larger workspaces raise it via `CODEG_WORKSPACE_DOWNLOAD_MAX_BYTES`.
+const WORKSPACE_DOWNLOAD_DEFAULT_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const WORKSPACE_DOWNLOAD_MAX_BYTES_ENV: &str = "CODEG_WORKSPACE_DOWNLOAD_MAX_BYTES";
+
+/// Cap on concurrent in-flight directory ZIP builds. The zip task pins
+/// a blocking thread plus a temp file; without this limit a handful of
+/// large-tree requests could saturate the blocking pool and exhaust
+/// disk. Override with `CODEG_WORKSPACE_DOWNLOAD_MAX_CONCURRENCY`.
+const WORKSPACE_DOWNLOAD_DEFAULT_CONCURRENCY: usize = 2;
+const WORKSPACE_DOWNLOAD_CONCURRENCY_ENV: &str =
+    "CODEG_WORKSPACE_DOWNLOAD_MAX_CONCURRENCY";
 
 pub fn workspace_upload_max_bytes() -> u64 {
     std::env::var(WORKSPACE_UPLOAD_MAX_BYTES_ENV)
@@ -62,6 +68,19 @@ pub fn workspace_download_max_bytes() -> u64 {
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(WORKSPACE_DOWNLOAD_DEFAULT_MAX_BYTES)
+}
+
+fn zip_semaphore() -> Arc<Semaphore> {
+    static SEM: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEM.get_or_init(|| {
+        let n = std::env::var(WORKSPACE_DOWNLOAD_CONCURRENCY_ENV)
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(WORKSPACE_DOWNLOAD_DEFAULT_CONCURRENCY);
+        Arc::new(Semaphore::new(n))
+    })
+    .clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +137,50 @@ fn ensure_inside_root(root: &Path, target: &Path) -> Result<(), AppCommandError>
         return Err(AppCommandError::invalid_input(
             "Resolved path escapes workspace root",
         ));
+    }
+    Ok(())
+}
+
+/// Walk from `root` toward `target` one segment at a time and reject if any
+/// already-existing component is a symlink. `target` must be a descendant of
+/// `root` (callers compose it via `resolve_relative_path`).
+///
+/// This runs *before* `create_dir_all`, which would otherwise follow a
+/// symlink mid-chain and silently create new directories outside the
+/// workspace. The earlier post-hoc `canonicalize` check caught the
+/// escape but the side-effect (empty dir at the symlink target) was
+/// already on disk.
+fn ensure_no_symlink_in_chain(root: &Path, target: &Path) -> Result<(), AppCommandError> {
+    let rel = target.strip_prefix(root).map_err(|_| {
+        AppCommandError::invalid_input("Target path is not under workspace root")
+    })?;
+    let mut current = root.to_path_buf();
+    for component in rel.components() {
+        let segment = match component {
+            Component::Normal(s) => s,
+            Component::CurDir => continue,
+            _ => {
+                return Err(AppCommandError::invalid_input(
+                    "Invalid path component while validating upload target",
+                ));
+            }
+        };
+        current.push(segment);
+        match std::fs::symlink_metadata(&current) {
+            Ok(md) => {
+                if md.file_type().is_symlink() {
+                    return Err(AppCommandError::invalid_input(
+                        "Upload path traverses a symlink; refuse to follow it",
+                    ));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // The remainder of the path doesn't exist yet — nothing
+                // for create_dir_all to follow into, so we're safe.
+                return Ok(());
+            }
+            Err(e) => return Err(AppCommandError::io(e)),
+        }
     }
     Ok(())
 }
@@ -268,6 +331,12 @@ pub async fn upload_workspace_file(
                 let final_abs = resolve_relative_path(&root, &final_rel)?;
 
                 if let Some(parent) = final_abs.parent() {
+                    // Reject *before* touching the filesystem if any
+                    // existing component along the path is a symlink —
+                    // otherwise `create_dir_all` would follow the link
+                    // and create directories outside the workspace
+                    // before the canonical check below could fire.
+                    ensure_no_symlink_in_chain(&root, parent)?;
                     tokio::fs::create_dir_all(parent).await.map_err(|e| {
                         AppCommandError::io_error("Failed to create upload directory")
                             .with_detail(e.to_string())
@@ -583,16 +652,86 @@ pub async fn download_workspace_dir(
     };
     let zip_name = format!("{dir_name}.zip");
 
+    // Bound concurrent zip jobs across the whole process. `acquire_owned`
+    // returns an `OwnedSemaphorePermit` we can move into the streaming
+    // state below, so the slot stays held until the client finishes
+    // draining the response (or hangs up).
+    let permit = zip_semaphore()
+        .acquire_owned()
+        .await
+        .map_err(|e| {
+            AppCommandError::io_error("Zip concurrency gate closed")
+                .with_detail(e.to_string())
+        })?;
+
     let dir_for_blocking = dir_path.clone();
     let max_bytes = workspace_download_max_bytes();
-    let bytes = tokio::task::spawn_blocking(move || {
-        build_zip_archive(&dir_for_blocking, max_bytes)
-    })
-    .await
-    .map_err(|e| AppCommandError::io_error("Zip task failed").with_detail(e.to_string()))??;
+    let (temp_file, content_length): (tempfile::NamedTempFile, u64) =
+        tokio::task::spawn_blocking(move || {
+            let mut temp = tempfile::NamedTempFile::new().map_err(|e| {
+                AppCommandError::io_error("Failed to create zip temp file")
+                    .with_detail(e.to_string())
+            })?;
+            let size = build_zip_archive_to_writer(
+                &dir_for_blocking,
+                max_bytes,
+                temp.as_file_mut(),
+            )?;
+            Ok::<_, AppCommandError>((temp, size))
+        })
+        .await
+        .map_err(|e| {
+            AppCommandError::io_error("Zip task failed").with_detail(e.to_string())
+        })??;
 
-    let content_length = bytes.len();
-    let body = Body::from(bytes);
+    // Re-open async for streaming. On Linux/macOS, holding two
+    // handles (the NamedTempFile-internal sync File and this async
+    // re-opened File) over the same inode is fine — unlink at stream
+    // end works even with handles open, and the inode is reclaimed
+    // when both close.
+    //
+    // **Windows caveat**: NamedTempFile opens with FILE_SHARE_DELETE
+    // so the re-open succeeds, but the unlink at NamedTempFile drop
+    // requires *all* handles to have been opened with
+    // FILE_SHARE_DELETE — `tokio::fs::File::open` (which delegates to
+    // `std::fs::File::open`) does NOT set that flag. The unlink call
+    // therefore succeeds in the sense that the file is marked for
+    // deletion, but the actual removal is deferred until the async
+    // handle's close completes. In the normal stream-drain path that
+    // close happens microseconds before the NamedTempFile drop (tuple
+    // drop order: `file` → `temp_file` → `permit`), so the inode is
+    // gone by the time this function returns. The race window only
+    // matters if a Windows-hosted codeg-server takes a hard process
+    // kill mid-stream; orphaned temp files then sit in `%TEMP%` until
+    // the OS scheduled cleanup runs.
+    let file = tokio::fs::File::open(temp_file.path())
+        .await
+        .map_err(AppCommandError::io)?;
+
+    // State carried through the stream: file handle, temp guard
+    // (NamedTempFile is unlinked on drop), and the permit (released on
+    // drop). All three drop atomically when the stream ends (`None`
+    // branch) or the client disconnects, which is exactly the cleanup
+    // we want.
+    let body_stream = stream::unfold(
+        (file, temp_file, permit),
+        |(mut file, temp_file, permit)| async move {
+            let mut buf = vec![0u8; 64 * 1024];
+            match file.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    Some((
+                        Ok::<_, std::io::Error>(Bytes::from(buf)),
+                        (file, temp_file, permit),
+                    ))
+                }
+                Err(e) => Some((Err(e), (file, temp_file, permit))),
+            }
+        },
+    );
+    let body = Body::from_stream(body_stream);
+
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -607,22 +746,30 @@ pub async fn download_workspace_dir(
     Ok((StatusCode::OK, headers, body).into_response())
 }
 
-/// Walk `dir` synchronously and produce a Deflate-compressed in-memory zip.
+/// Walk `dir` and write a Deflate-compressed zip archive into `sink`.
 ///
-/// Runs on the blocking pool because both `walkdir` and `zip::ZipWriter`
-/// are sync APIs. `max_bytes` bounds the total *uncompressed* source
-/// bytes scanned, which in turn bounds peak memory: the buffered ZIP
-/// can never exceed the source it was built from. Operators who need
-/// larger archives raise the cap via `CODEG_WORKSPACE_DOWNLOAD_MAX_BYTES`.
+/// Runs on the blocking pool because `walkdir` and `zip::ZipWriter` are
+/// sync APIs, and `ZipWriter` requires `Write + Seek` (so we cannot
+/// stream into an mpsc channel directly — the caller uses a temp file
+/// as the seekable sink instead). `max_bytes` caps the total
+/// uncompressed source bytes scanned; exceeding it errors out before
+/// any response is sent so the client gets a 400, not a truncated zip.
+///
+/// Returns the final on-disk archive size in bytes, used for the
+/// `Content-Length` response header.
 ///
 /// Symlinks are intentionally skipped (not followed) — `follow_links(false)`
 /// reports a symlink as neither file nor directory, and we leave it that
 /// way to avoid traversing out of the workspace via a misplaced link.
-fn build_zip_archive(dir: &Path, max_bytes: u64) -> Result<Vec<u8>, AppCommandError> {
+fn build_zip_archive_to_writer<W: std::io::Write + std::io::Seek>(
+    dir: &Path,
+    max_bytes: u64,
+    sink: W,
+) -> Result<u64, AppCommandError> {
     use std::io::Read;
     use zip::write::SimpleFileOptions;
 
-    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::<u8>::new()));
+    let mut writer = zip::ZipWriter::new(sink);
     let base_options = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
     // Directories need the execute bit so extractors set a mode that
@@ -701,10 +848,14 @@ fn build_zip_archive(dir: &Path, max_bytes: u64) -> Result<Vec<u8>, AppCommandEr
             dir.display()
         );
     }
-    let cursor = writer.finish().map_err(|e| {
+    let mut finished = writer.finish().map_err(|e| {
         AppCommandError::io_error("Failed to finalize zip").with_detail(e.to_string())
     })?;
-    Ok(cursor.into_inner())
+    let size = finished.stream_position().map_err(|e| {
+        AppCommandError::io_error("Failed to measure zip size")
+            .with_detail(e.to_string())
+    })?;
+    Ok(size)
 }
 
 #[cfg(test)]
@@ -769,5 +920,35 @@ mod tests {
         assert!(validate_relative_components(Path::new("../escape")).is_err());
         assert!(validate_relative_components(Path::new("/etc/passwd")).is_err());
         assert!(validate_relative_components(Path::new("a/b")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_no_symlink_in_chain_rejects_intermediate_symlink() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("tempdir root");
+        let outside = tempfile::tempdir().expect("tempdir outside");
+
+        // root/link -> outside
+        symlink(outside.path(), root.path().join("link")).expect("symlink");
+
+        // Target: root/link/sub — does NOT exist, but the intermediate
+        // `link` component is a symlink that would carry create_dir_all
+        // out of the root.
+        let target = root.path().join("link").join("sub");
+        let err = ensure_no_symlink_in_chain(root.path(), &target)
+            .expect_err("should reject symlink in chain");
+        assert!(
+            err.message.contains("symlink"),
+            "unexpected error: {}",
+            err.message
+        );
+
+        // Sanity: no symlink in chain → ok.
+        fs::create_dir(root.path().join("real")).expect("real dir");
+        let ok_target = root.path().join("real").join("nested").join("file.txt");
+        assert!(ensure_no_symlink_in_chain(root.path(), &ok_target).is_ok());
     }
 }
