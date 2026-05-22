@@ -480,13 +480,23 @@ impl ConnectionManager {
         blocks: Vec<PromptInputBlock>,
         folder_id: Option<i32>,
         conversation_id: Option<i32>,
-    ) -> Result<(), AcpError> {
+        delegation: Option<crate::acp::delegation::spawner::DelegationLink>,
+    ) -> Result<Option<i32>, AcpError> {
         // Caller-supplied conversation_id requires folder_id (we include it in
         // the emitted ConversationLinked event so subscribers don't have to
         // re-query the DB). Validate before touching any state.
         if conversation_id.is_some() && folder_id.is_none() {
             return Err(AcpError::protocol(
                 "conversation_id provided without folder_id".to_string(),
+            ));
+        }
+        // Delegation is only meaningful on the create-new-row branch — adopting
+        // an existing caller-supplied row already has its own (or no) parent
+        // linkage. Reject the combination loudly so a misuse from the broker
+        // doesn't silently drop the linkage.
+        if delegation.is_some() && conversation_id.is_some() {
+            return Err(AcpError::protocol(
+                "delegation link is incompatible with caller-supplied conversation_id".to_string(),
             ));
         }
 
@@ -545,18 +555,31 @@ impl ConnectionManager {
                 // silent fallback to working_dir-based find-or-create masked
                 // contract violations.
                 (None, Some(folder_id)) => {
-                    let row =
-                        conversation_service::create(&db.conn, folder_id, agent_type, None, None)
-                            .await
-                            .map_err(|e| AcpError::protocol(e.to_string()))?;
+                    // Snapshot the delegation link before move-into-create: we
+                    // still need the parent ids for the ConversationLinked
+                    // event payload.
+                    let parent_conversation_id_for_event =
+                        delegation.as_ref().map(|d| d.parent_conversation_id);
+                    let parent_tool_use_id_for_event =
+                        delegation.as_ref().map(|d| d.parent_tool_use_id.clone());
+                    let row = conversation_service::create_with_delegation(
+                        &db.conn,
+                        folder_id,
+                        agent_type,
+                        None,
+                        None,
+                        delegation.clone(),
+                    )
+                    .await
+                    .map_err(|e| AcpError::protocol(e.to_string()))?;
                     emit_with_state(
                         &state_arc,
                         &emitter,
                         AcpEvent::ConversationLinked {
                             conversation_id: row.id,
                             folder_id,
-                            parent_conversation_id: None,
-                            parent_tool_use_id: None,
+                            parent_conversation_id: parent_conversation_id_for_event,
+                            parent_tool_use_id: parent_tool_use_id_for_event,
                         },
                     )
                     .await;
@@ -627,7 +650,7 @@ impl ConnectionManager {
         // PendingReview write also never fires — the row would be stuck
         // until a follow-up `send_prompt_linked` happened to re-flip it.
         match self.send_prompt_inner(conn_id, blocks).await {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(conversation_id_for_status),
             Err(send_err) => {
                 if let Some(cid) = conversation_id_for_status {
                     match conversation_service::update_status(
@@ -1015,6 +1038,136 @@ impl ConnectionManager {
     }
 }
 
+/// Production impl of `ConnectionSpawner` used by `DelegationBroker`.
+///
+/// Bundles `Arc<ConnectionManager>` with `Arc<AppDatabase>` because
+/// `cancel` writes the cancelled status onto the conversation row, which
+/// happens inside `ConnectionManager::cancel`. The wrapper exists so the
+/// broker can depend on a small `dyn`-able interface instead of pulling
+/// in the full `AppState` graph.
+#[derive(Clone)]
+pub struct ConnectionManagerSpawner {
+    pub manager: Arc<ConnectionManager>,
+    pub db: Arc<AppDatabase>,
+}
+
+#[async_trait::async_trait]
+impl crate::acp::delegation::spawner::ConnectionSpawner for ConnectionManagerSpawner {
+    async fn spawn(
+        &self,
+        parent_connection_id: &str,
+        agent_type: AgentType,
+        working_dir: Option<String>,
+    ) -> Result<String, crate::acp::delegation::spawner::SpawnerError> {
+        use crate::acp::delegation::spawner::SpawnerError;
+        // Resolve the parent connection so we can inherit its emitter and
+        // owner_window. Falling back is not safe: a child whose emitter is
+        // wired to a different broadcaster would emit events the frontend
+        // never sees.
+        let (emitter, owner_window, parent_working_dir) = {
+            let conns = self.manager.connections.lock().await;
+            let parent = conns
+                .get(parent_connection_id)
+                .ok_or_else(|| {
+                    SpawnerError::Spawn(format!(
+                        "parent connection {parent_connection_id} not found"
+                    ))
+                })?;
+            let pwd = {
+                let s = parent.state.read().await;
+                s.working_dir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+            };
+            (parent.emitter.clone(), parent.owner_window_label.clone(), pwd)
+        };
+        let effective_working_dir = working_dir.or(parent_working_dir);
+        self.manager
+            .spawn_agent(
+                agent_type,
+                effective_working_dir,
+                None,
+                BTreeMap::new(),
+                owner_window,
+                emitter,
+                None,
+                BTreeMap::new(),
+            )
+            .await
+            .map_err(|e| SpawnerError::Spawn(e.to_string()))
+    }
+
+    async fn send_prompt_linked_for_delegation(
+        &self,
+        conn_id: &str,
+        task: String,
+        link: crate::acp::delegation::spawner::DelegationLink,
+    ) -> Result<i32, crate::acp::delegation::spawner::SpawnerError> {
+        use crate::acp::delegation::spawner::SpawnerError;
+        // The child has no caller-supplied conversation_id (it's brand new).
+        // folder_id must be None too — the manager's create-new-row branch
+        // requires folder_id, which we resolve from the child's working_dir
+        // via folder_service. Do that lookup here so the trait stays small.
+        let working_dir_pathbuf = {
+            let conns = self.manager.connections.lock().await;
+            let conn = conns
+                .get(conn_id)
+                .ok_or_else(|| SpawnerError::Send(format!("child {conn_id} not found")))?;
+            let s = conn.state.read().await;
+            s.working_dir.clone()
+        };
+        let folder_path = working_dir_pathbuf
+            .ok_or_else(|| {
+                SpawnerError::Send(
+                    "child connection has no working_dir; cannot derive folder_id".into(),
+                )
+            })?
+            .to_string_lossy()
+            .to_string();
+        let folder = crate::db::service::folder_service::add_folder(&self.db.conn, &folder_path)
+            .await
+            .map_err(|e| SpawnerError::Send(format!("add_folder: {e}")))?;
+
+        let result = self
+            .manager
+            .send_prompt_linked(
+                &self.db,
+                conn_id,
+                vec![PromptInputBlock::Text { text: task }],
+                Some(folder.id),
+                None,
+                Some(link),
+            )
+            .await
+            .map_err(|e| SpawnerError::Send(e.to_string()))?;
+        result.ok_or_else(|| {
+            SpawnerError::Send(
+                "send_prompt_linked succeeded but no conversation_id was bound".into(),
+            )
+        })
+    }
+
+    async fn cancel(
+        &self,
+        conn_id: &str,
+    ) -> Result<(), crate::acp::delegation::spawner::SpawnerError> {
+        self.manager
+            .cancel(&self.db.conn, conn_id)
+            .await
+            .map_err(|e| crate::acp::delegation::spawner::SpawnerError::Cancel(e.to_string()))
+    }
+
+    async fn disconnect(
+        &self,
+        conn_id: &str,
+    ) -> Result<(), crate::acp::delegation::spawner::SpawnerError> {
+        self.manager
+            .disconnect(conn_id)
+            .await
+            .map_err(|e| crate::acp::delegation::spawner::SpawnerError::Disconnect(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1154,7 +1307,7 @@ mod tests {
         // First call: creates conversation row, sets state.conversation_id.
         // The mpsc send error after linking is expected and ignored here.
         let _ = mgr
-            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None)
+            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None, None)
             .await;
         let snap = mgr
             .get_state(conn_id)
@@ -1172,7 +1325,7 @@ mod tests {
 
         // Second call: ignores folder_id, does NOT create another row.
         let _ = mgr
-            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None)
+            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None, None)
             .await;
         let snap2 = mgr
             .get_state(conn_id)
@@ -1195,7 +1348,7 @@ mod tests {
             map.insert(conn_id.into(), fake_connection(conn_id, None));
         }
         let result = mgr
-            .send_prompt_linked(&db, conn_id, vec![], None, None)
+            .send_prompt_linked(&db, conn_id, vec![], None, None, None)
             .await;
         assert!(
             result.is_err(),
@@ -1249,7 +1402,7 @@ mod tests {
 
         // Send with caller-supplied conversation_id + folder_id.
         let _ = mgr
-            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), Some(pre_existing.id))
+            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), Some(pre_existing.id), None)
             .await;
 
         // No new conversation row was created.
@@ -1292,7 +1445,7 @@ mod tests {
         .await;
 
         let err = mgr
-            .send_prompt_linked(&db, conn_id, vec![], None, Some(42))
+            .send_prompt_linked(&db, conn_id, vec![], None, Some(42), None)
             .await
             .expect_err("should reject conversation_id without folder_id");
         assert!(matches!(err, AcpError::Protocol(_)));
@@ -1328,7 +1481,7 @@ mod tests {
 
         let before = count_conversation_rows(&db).await;
         let _ = mgr
-            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), Some(pre.id))
+            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), Some(pre.id), None)
             .await;
         let after = count_conversation_rows(&db).await;
         assert_eq!(after, before);
@@ -1398,7 +1551,7 @@ mod tests {
         //   2. ConversationStatusChanged(InProgress)  [pre-send write]
         //   3. ConversationStatusChanged(Cancelled)   [rollback after send failure]
         let _ = mgr
-            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None)
+            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None, None)
             .await;
 
         let env1 = recv_first_acp_event(&mut rx).await;
@@ -1467,7 +1620,7 @@ mod tests {
             .unwrap();
 
         let _ = mgr
-            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None)
+            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None, None)
             .await;
 
         let env4 = recv_first_acp_event(&mut rx).await;
@@ -1818,12 +1971,12 @@ mod tests {
         tokio::join!(
             async {
                 let _ = mgr_ref
-                    .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None)
+                    .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None, None)
                     .await;
             },
             async {
                 let _ = mgr_ref
-                    .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None)
+                    .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None, None)
                     .await;
             },
         );
@@ -1944,7 +2097,7 @@ mod tests {
         let mut rx = subscribe_conn_stream(&mgr, conn_id).await;
 
         let result = mgr
-            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None)
+            .send_prompt_linked(&db, conn_id, vec![], Some(folder_id), None, None)
             .await;
         assert!(
             matches!(result, Err(AcpError::ProcessExited)),

@@ -15,11 +15,35 @@ pub async fn create(
     title: Option<String>,
     git_branch: Option<String>,
 ) -> Result<conversation::Model, DbError> {
+    create_with_delegation(conn, folder_id, agent_type, title, git_branch, None).await
+}
+
+/// Mirror of [`create`] plus optional delegation linkage. Used by the
+/// multi-agent broker when spawning a child sub-session — populates
+/// `parent_id` / `parent_tool_use_id` / `delegation_call_id` so the lifecycle
+/// subscriber and frontend can rebuild the parent ↔ child binding without
+/// inspecting the live broker state.
+pub async fn create_with_delegation(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+    agent_type: AgentType,
+    title: Option<String>,
+    git_branch: Option<String>,
+    delegation: Option<crate::acp::delegation::spawner::DelegationLink>,
+) -> Result<conversation::Model, DbError> {
     let at_str = serde_json::to_value(agent_type)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_default();
     let now = Utc::now();
+    let (parent_id, parent_tool_use_id, delegation_call_id) = match delegation {
+        Some(link) => (
+            Some(link.parent_conversation_id),
+            Some(link.parent_tool_use_id),
+            Some(link.delegation_call_id),
+        ),
+        None => (None, None, None),
+    };
     let model = conversation::ActiveModel {
         id: NotSet,
         folder_id: Set(folder_id),
@@ -29,9 +53,9 @@ pub async fn create(
         model: Set(None),
         git_branch: Set(git_branch),
         external_id: Set(None),
-        parent_id: Set(None),
-        parent_tool_use_id: Set(None),
-        delegation_call_id: Set(None),
+        parent_id: Set(parent_id),
+        parent_tool_use_id: Set(parent_tool_use_id),
+        delegation_call_id: Set(delegation_call_id),
         message_count: Set(0),
         created_at: Set(now),
         updated_at: Set(now),
