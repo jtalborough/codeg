@@ -1605,11 +1605,20 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
         }),
         AgentType::OpenCode => Some(SkillStorageSpec {
             kind: SkillStorageKind::SkillDirectoryOnly,
-            global_dirs: vec![home_dir_or_default()
-                .join(".config")
-                .join("opencode")
-                .join("skills")],
-            project_rel_dirs: vec![".opencode/skills"],
+            // OpenCode is a "universal" agent for the `skills` CLI (its
+            // skillsDir is `.agents/skills`): a global `skills add` writes the
+            // real skill into the shared `~/.agents/skills` store and does NOT
+            // create a `~/.config/opencode/skills` symlink. OpenCode reads both
+            // locations, so probe both — otherwise CLI-installed skills are
+            // invisible here and in Settings → Skills.
+            global_dirs: vec![
+                home_dir_or_default()
+                    .join(".config")
+                    .join("opencode")
+                    .join("skills"),
+                home_dir_or_default().join(".agents").join("skills"),
+            ],
+            project_rel_dirs: vec![".agents/skills", ".opencode/skills"],
         }),
         AgentType::Gemini => Some(SkillStorageSpec {
             kind: SkillStorageKind::SkillDirectoryOnly,
@@ -1878,7 +1887,7 @@ pub(crate) fn remove_skill_entry(path: &Path) -> std::io::Result<()> {
     fs::remove_file(path)
 }
 
-fn list_skills_from_dir(
+pub(crate) fn list_skills_from_dir(
     scope: AgentSkillScope,
     dir: &Path,
     kind: SkillStorageKind,
