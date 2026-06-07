@@ -42,13 +42,13 @@ mod tauri_app {
     use crate::acp::manager::ConnectionManager;
     use crate::chat_channel::manager::ChatChannelManager;
     use crate::commands::{
-        acp as acp_commands, backup, chat_channel as chat_channel_commands, conversations,
-        delegation as delegation_commands, experts as experts_commands, file_io, folder_commands,
-        folders, mcp as mcp_commands, model_provider as model_provider_commands, notification,
-        pet as pet_commands, project_boot, quick_messages as quick_messages_commands,
-        remote_proxy as remote_proxy_commands, remote_workspace as remote_workspace_commands,
-        system_settings, terminal as terminal_commands, version_control, windows,
-        workspace_state as workspace_state_commands,
+        acp as acp_commands, app_update as app_update_commands, backup,
+        chat_channel as chat_channel_commands, conversations, delegation as delegation_commands,
+        experts as experts_commands, file_io, folder_commands, folders, mcp as mcp_commands,
+        model_provider as model_provider_commands, notification, pet as pet_commands, project_boot,
+        quick_messages as quick_messages_commands, remote_proxy as remote_proxy_commands,
+        remote_workspace as remote_workspace_commands, system_settings, terminal as terminal_commands,
+        version_control, windows, workspace_state as workspace_state_commands,
     };
     use crate::terminal::manager::TerminalManager;
     use crate::{db, git_credential, network, paths, process, web};
@@ -188,6 +188,10 @@ mod tauri_app {
                 std::sync::Arc::new(crate::acp::InternalEventBus::new(metrics))
             })
             .manage(crate::pet_state_mapper::new_pet_state_handle())
+            // Source of truth for an in-flight app self-update. Shared with the
+            // embedded web server's AppState so HTTP and webview clients see the
+            // same download progress; lets the upgrade UI survive navigation.
+            .manage(crate::update::new_update_state_handle())
             .setup(|app| {
                 let app_data_dir = app.path().app_data_dir()?;
 
@@ -799,6 +803,9 @@ mod tauri_app {
                 pet_commands::pet_marketplace_install,
                 pet_commands::pet_celebrate,
                 pet_commands::pet_get_current_state,
+                app_update_commands::app_update_state,
+                app_update_commands::perform_app_update,
+                app_update_commands::restart_app,
                 project_boot::detect_package_manager,
                 project_boot::create_shadcn_project,
                 project_boot::detect_hyperframes_skills,

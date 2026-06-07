@@ -697,6 +697,10 @@ pub fn build_router(
             post(handlers::web_server::app_update_status),
         )
         .route(
+            "/app_update_state",
+            post(handlers::app_update::app_update_state),
+        )
+        .route(
             "/perform_app_update",
             post(handlers::app_update::perform_app_update),
         )
