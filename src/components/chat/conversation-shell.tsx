@@ -203,7 +203,7 @@ export function ConversationShell({
           it never squeezes the message list above it, and aligns to the input
           width. */}
       <div className="relative">
-        {pendingAskQuestion && (
+        {pendingAskQuestion && pendingAskQuestion.questions.length > 0 && (
           <div className="pointer-events-none absolute inset-x-0 bottom-full z-20">
             <div className="pointer-events-auto mx-auto w-full max-w-3xl px-4">
               <AskQuestionCard

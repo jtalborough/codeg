@@ -478,4 +478,11 @@ describe("AskQuestionCard", () => {
     expect(screen.getAllByRole("tab")).toHaveLength(2)
     expect(screen.getByRole("button", { name: /Submit/ })).toBeDisabled()
   })
+
+  it("renders nothing for an empty question set", () => {
+    // Defensive guard: an empty set must not render a 0/0 card whose enabled
+    // Submit would post an empty affirmative answer instead of a decline.
+    const { container } = renderWith({ ...single, questions: [] }, vi.fn())
+    expect(container).toBeEmptyDOMElement()
+  })
 })

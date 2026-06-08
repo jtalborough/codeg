@@ -379,11 +379,20 @@ export function AskQuestionCard({ question, onAnswer }: AskQuestionCardProps) {
     </div>
   )
 
+  // Defensive: the backend mints a non-empty set and ConversationShell also
+  // guards the mount, but never render an empty card — it would show 0/0 and a
+  // Submit that posts an empty affirmative answer rather than a decline.
+  if (questions.length === 0) return null
+
   return (
     // Capped to the viewport (header + footer pinned, body scrolls) so a tall set
     // never covers the whole message list and always keeps Submit/Skip reachable.
     // `overflow-hidden` clips the full-bleed progress bar to the rounded corners.
-    <div className="mb-2 flex max-h-[88svh] flex-col overflow-hidden rounded-xl border border-primary/30 bg-card shadow-lg">
+    <div
+      role="group"
+      aria-label={t("title")}
+      className="mb-2 flex max-h-[88svh] flex-col overflow-hidden rounded-xl border border-primary/30 bg-card shadow-lg"
+    >
       {isMulti && (
         <Progress
           value={(answeredCount / questions.length) * 100}
