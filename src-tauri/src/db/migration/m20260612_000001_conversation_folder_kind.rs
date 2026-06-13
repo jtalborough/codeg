@@ -146,7 +146,7 @@ enum Conversation {
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
-    use sea_orm_migration::{MigrationName, MigratorTrait};
+    use sea_orm_migration::MigratorTrait;
 
     use crate::db::migration::Migrator;
 
