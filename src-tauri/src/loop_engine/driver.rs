@@ -194,22 +194,28 @@ pub(crate) fn resolve_agent(config: &IssueConfig, stage: Stage) -> AgentType {
         .unwrap_or(AgentType::ClaudeCode)
 }
 
-/// Has this issue already had a triage iteration dispatched (and not failed)?
+/// Does this issue already have a triage iteration on record (in ANY state)?
 /// Triage targets the whole issue (`target = None`), so the §4.1a node lease
-/// can't dedup it (SQLite treats NULL targets as distinct) — this app-level
-/// gate is what stops a re-tick from launching a second triage.
-async fn has_live_triage(conn: &sea_orm::DatabaseConnection, issue_id: i32) -> Result<bool, LoopError> {
+/// can't dedup it (SQLite treats NULL targets as distinct) — this app-level gate
+/// is what stops `tick_once` from launching a *second* initial triage.
+///
+/// It counts every status, not just the live/succeeded ones: once any triage
+/// exists, all further (bounded) redispatch is owned by `recover_undecided_triage`
+/// — never `tick_once`'s own branch. If this gate excluded `failed`/`interrupted`,
+/// an abandoned triage (now settled `Failed` by the reconcile) would re-trigger
+/// `tick_once`'s unbounded attempt-0 dispatch here instead of going through the
+/// bounded recovery, looping forever. So the rule is simply "any triage row =
+/// the slot is taken; defer to recovery".
+async fn has_any_triage(
+    conn: &sea_orm::DatabaseConnection,
+    issue_id: i32,
+) -> Result<bool, LoopError> {
     let triage = loop_iteration::Entity::find()
         .filter(loop_iteration::Column::IssueId.eq(issue_id))
         .filter(loop_iteration::Column::Stage.eq(Stage::Triage))
         .all(conn)
         .await?;
-    Ok(triage.iter().any(|it| {
-        matches!(
-            it.status,
-            IterationStatus::Queued | IterationStatus::Running | IterationStatus::Succeeded
-        )
-    }))
+    Ok(!triage.is_empty())
 }
 
 /// Record `skips_to` provenance for routes that skip stages: every task gets a
@@ -353,8 +359,11 @@ pub(crate) async fn tick_once(
         return Ok(TickOutcome::Idle);
     };
 
-    // Triage first: it decides the route the rest of the pipeline follows.
-    if !has_live_triage(conn, issue_id).await? {
+    // Triage first: it decides the route the rest of the pipeline follows. This
+    // branch dispatches only the *initial* triage (none on record yet); every
+    // retry afterwards is owned by `recover_undecided_triage`, which bounds it by
+    // `max_attempts`.
+    if !has_any_triage(conn, issue_id).await? {
         let dispatched = dispatch_iteration(
             db,
             data_dir,
@@ -646,7 +655,7 @@ mod tests {
     use crate::db::entities::loop_issue::IssuePriority;
     use crate::db::service::loop_service::{issue, space};
     use crate::db::test_helpers::{fresh_in_memory_db, seed_folder};
-    use crate::loop_engine::dispatch::settle_iteration;
+    use crate::loop_engine::dispatch::{settle_iteration, settle_iteration_as, SettleResolution};
     use crate::loop_engine::ingest::ingest;
     use crate::loop_engine::transitions::cas_artifact_status;
     use crate::models::loops::IssueConfig;
@@ -897,6 +906,61 @@ mod tests {
             .await
             .unwrap();
         assert!(card.is_some(), "blocked triage files an inbox card");
+    }
+
+    #[tokio::test]
+    async fn abandoned_triage_uses_bounded_recovery_not_unbounded_redispatch() {
+        let (db, data_dir, issue_id) = setup().await;
+        // max_attempts = 1 → a single failed triage with no route must BLOCK. A
+        // Failed triage still counts as "triage on record", so tick_once defers to
+        // bounded recovery instead of its unbounded attempt-0 initial-dispatch.
+        let cfg = IssueConfig {
+            max_attempts: 1,
+            ..IssueConfig::default()
+        };
+        loop_issue::Entity::update_many()
+            .col_expr(
+                loop_issue::Column::Config,
+                Expr::value(serde_json::to_string(&cfg).unwrap()),
+            )
+            .filter(loop_issue::Column::Id.eq(issue_id))
+            .exec(&db.conn)
+            .await
+            .unwrap();
+        let spawner = StubSpawner;
+
+        // Tick 1: dispatch triage, then abandon it (dead connection → Failed).
+        tick_once(&db, &data_dir, &spawner, &EventEmitter::Noop, issue_id)
+            .await
+            .unwrap();
+        let running = loop_iteration::Entity::find()
+            .filter(loop_iteration::Column::Stage.eq(Stage::Triage))
+            .filter(loop_iteration::Column::Status.eq(IterationStatus::Running))
+            .all(&db.conn)
+            .await
+            .unwrap();
+        for it in running {
+            settle_iteration_as(&db, &EventEmitter::Noop, it.id, SettleResolution::Abandoned)
+                .await
+                .unwrap();
+        }
+
+        // Tick 2: one Failed triage + undecided route + max_attempts=1 → block,
+        // NOT a fresh attempt-0 dispatch (the pre-fix bug).
+        let out = tick_once(&db, &data_dir, &spawner, &EventEmitter::Noop, issue_id)
+            .await
+            .unwrap();
+        assert_eq!(out, TickOutcome::Idle);
+        let issue = loop_issue::Entity::find_by_id(issue_id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            issue.status,
+            IssueStatus::Blocked,
+            "an abandoned triage must bound via recovery, not redispatch unbounded"
+        );
     }
 
     /// Simulate the dispatched iteration's agent: submit the stage-appropriate
