@@ -477,6 +477,22 @@ async fn fail_iteration(
     .await;
 }
 
+/// The artifact ids an iteration produced (its `produced_by_iteration_id`
+/// fan-out). Used by both settle branches — the winner to report progress, the
+/// non-winner to mirror the already-landed state without mutating.
+async fn produced_artifact_ids(
+    conn: &sea_orm::DatabaseConnection,
+    iteration_id: i32,
+) -> Result<Vec<i32>, LoopError> {
+    Ok(loop_artifact::Entity::find()
+        .filter(loop_artifact::Column::ProducedByIterationId.eq(iteration_id))
+        .all(conn)
+        .await?
+        .into_iter()
+        .map(|a| a.id)
+        .collect())
+}
+
 /// §4.9 settlement: finalize a completed iteration. Re-parses the session file
 /// for token usage, succeeds the lease, and — when the run produced nothing —
 /// bumps the target node's rework counter + records a failure signature for the
@@ -504,8 +520,34 @@ pub async fn settle_iteration_as(
         .await?
         .ok_or_else(|| LoopError::NotFound(format!("iteration {iteration_id}")))?;
 
+    // A normal completion succeeds the lease; an abandoned orphan (dead
+    // connection, no completed turn) fails it — never faked as success.
+    let terminal = match resolution {
+        SettleResolution::Completed => IterationStatus::Succeeded,
+        SettleResolution::Abandoned => IterationStatus::Failed,
+    };
+
+    // Single-winner gate (§2.2): the CAS `running → terminal` is the settlement
+    // authority. Token accounting, the node rework bump, and the budget breaker
+    // run ONLY for the winner, so a double settle (turn-complete event + the
+    // reconcile backstop racing) can never double-count.
+    let won = cas_iteration_status(conn, iteration_id, IterationStatus::Running, terminal).await?;
+    if !won {
+        // Already settled by the other trigger — report its landed state, mutate
+        // nothing.
+        let produced = produced_artifact_ids(conn, iteration_id).await?;
+        return Ok(SettleOutcome {
+            iteration_id,
+            tokens_used: iter.tokens_used,
+            made_progress: !produced.is_empty(),
+            produced_artifact_ids: produced,
+        });
+    }
+
+    // ----- winner-only side effects -----
     // §4.9 token settlement: re-parse the session file for usage. A missing or
-    // not-yet-written session file settles to 0 rather than failing.
+    // not-yet-written session file settles to 0 here; Task 6 hardens this into a
+    // bounded retry + `tokens_pending` so the budget never trips on a phantom 0.
     let tokens_used = match iter.conversation_id {
         Some(conv_id) => match get_folder_conversation_core(conn, conv_id).await {
             Ok((detail, _)) => detail
@@ -534,22 +576,7 @@ pub async fn settle_iteration_as(
     }
 
     // Which artifacts did this iteration produce?
-    let produced_artifact_ids: Vec<i32> = loop_artifact::Entity::find()
-        .filter(loop_artifact::Column::ProducedByIterationId.eq(iteration_id))
-        .all(conn)
-        .await?
-        .into_iter()
-        .map(|a| a.id)
-        .collect();
-
-    // Settle the lease (idempotent CAS). A normal completion succeeds; an
-    // abandoned orphan (dead connection, no completed turn) fails — it must never
-    // be faked as success.
-    let terminal = match resolution {
-        SettleResolution::Completed => IterationStatus::Succeeded,
-        SettleResolution::Abandoned => IterationStatus::Failed,
-    };
-    cas_iteration_status(conn, iteration_id, IterationStatus::Running, terminal).await?;
+    let produced_artifact_ids = produced_artifact_ids(conn, iteration_id).await?;
 
     let made_progress = !produced_artifact_ids.is_empty();
     let abandoned = resolution == SettleResolution::Abandoned;
@@ -1034,6 +1061,45 @@ mod tests {
             .unwrap();
         assert_eq!(settled.status, IterationStatus::Succeeded);
         assert!(settled.ended_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn double_settle_bumps_node_attempt_exactly_once() {
+        let (db, _data_dir, space_id, issue_id, _f) = seed().await;
+        let target = artifact::create_artifact(&db.conn, space_id, issue_id, ArtifactKind::Requirement, "R", ArtifactStatus::Done, ActorKind::Agent, None)
+            .await
+            .unwrap();
+        let iter = try_claim_iteration(
+            &db.conn,
+            IterationClaim {
+                space_id,
+                issue_id,
+                stage: Stage::Design,
+                target_artifact_id: Some(target.id),
+                slot_no: None,
+                capability_token: "t".into(),
+                attempt: 0,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        cas_iteration_status(&db.conn, iter.id, IterationStatus::Queued, IterationStatus::Running)
+            .await
+            .unwrap();
+
+        // Two settles race; only the CAS winner mutates (a Design iteration that
+        // produced nothing bumps its target's rework counter — exactly once).
+        let a = settle_iteration(&db, &EventEmitter::Noop, iter.id);
+        let b = settle_iteration(&db, &EventEmitter::Noop, iter.id);
+        let (_ra, _rb) = tokio::join!(a, b);
+
+        let node = loop_artifact::Entity::find_by_id(target.id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(node.attempt, 1, "no-progress bump applied exactly once across a double settle");
     }
 
     #[tokio::test]
