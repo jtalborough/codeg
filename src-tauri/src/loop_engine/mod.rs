@@ -367,7 +367,7 @@ mod tests {
             "I",
             "b",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();
@@ -404,7 +404,7 @@ mod tests {
             "I",
             "b",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();

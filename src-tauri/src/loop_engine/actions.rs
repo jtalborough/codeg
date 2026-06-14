@@ -276,7 +276,8 @@ impl LoopEngine {
             .base_commit
             .clone()
             .ok_or_else(|| LoopError::Git("issue has no recorded base commit".into()))?;
-        let config = crate::loop_engine::config_resolver::effective_config(&self.db.conn, &issue).await;
+        let config =
+            crate::loop_engine::config_resolver::effective_config(&self.db.conn, &issue).await?;
 
         // Serialize merges per base repo: two issues sharing a repo must not race
         // their --no-ff landings on the base branch ref / working tree.
@@ -627,7 +628,7 @@ mod tests {
             "I",
             "b",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();
@@ -946,7 +947,7 @@ mod tests {
             "I",
             "b",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();

@@ -430,7 +430,7 @@ mod tests {
             "Build",
             "desc",
             Prio::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();

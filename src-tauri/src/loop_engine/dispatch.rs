@@ -611,7 +611,7 @@ pub async fn settle_iteration_as(
             // breaker re-trips, matching the write pipeline's retry contract.
             let new_attempt = iter.attempt + 1;
             if let Some(issue_row) = loop_issue::Entity::find_by_id(iter.issue_id).one(conn).await? {
-                let max = effective_config(conn, &issue_row).await.max_attempts as i32;
+                let max = effective_config(conn, &issue_row).await?.max_attempts as i32;
                 if max > 0 && new_attempt >= max {
                     block_issue_no_progress(
                         db,
@@ -807,7 +807,7 @@ mod tests {
             "Fix it",
             "body",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();

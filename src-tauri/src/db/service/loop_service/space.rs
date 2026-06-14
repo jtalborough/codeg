@@ -14,15 +14,22 @@ fn not_found(id: i32) -> DbError {
     DbError::Database(sea_orm::DbErr::RecordNotFound(format!("loop_space {id}")))
 }
 
+fn config_err(e: serde_json::Error) -> DbError {
+    DbError::Database(sea_orm::DbErr::Custom(format!("loop space config: {e}")))
+}
+
 pub async fn create_space(
     conn: &sea_orm::DatabaseConnection,
     name: &str,
     folder_id: i32,
 ) -> Result<loop_space::Model, DbError> {
     let now = Utc::now();
+    // `default_config` is NOT NULL — every space stores a concrete config.
+    let default_config = serde_json::to_string(&IssueConfig::default()).map_err(config_err)?;
     let active = loop_space::ActiveModel {
         name: Set(name.to_string()),
         folder_id: Set(folder_id),
+        default_config: Set(default_config),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
@@ -45,14 +52,15 @@ pub async fn update_space(
     Ok(active.update(conn).await?)
 }
 
-/// Set (or clear, with `None`) the space's default issue config (stored JSON).
-/// Inheriting issues resolve their config from this at read time.
+/// Set the space's default issue config (stored JSON, NOT NULL). Issues whose own
+/// config is NULL resolve from this at read time. "Reset to engine default" is
+/// just the caller passing `&IssueConfig::default()`.
 pub async fn set_default_config(
     conn: &sea_orm::DatabaseConnection,
     id: i32,
-    config: Option<&IssueConfig>,
+    config: &IssueConfig,
 ) -> Result<(), DbError> {
-    let json = config.map(|c| serde_json::to_string(c).unwrap_or_else(|_| "{}".to_string()));
+    let json = serde_json::to_string(config).map_err(config_err)?;
     let row = loop_space::Entity::find_by_id(id)
         .one(conn)
         .await?
@@ -109,7 +117,7 @@ pub async fn list_spaces(
 
     let summaries = spaces
         .into_iter()
-        .map(|s| {
+        .map(|s| -> Result<LoopSpaceSummary, DbError> {
             let folder = folders.get(&s.folder_id);
             // Folder join does NOT filter deleted_at — a soft-deleted/missing
             // folder still yields the space (read-only) and flips `detached`.
@@ -123,7 +131,8 @@ pub async fn list_spaces(
                 .filter(|i| i.status == IssueStatus::Running)
                 .count() as i64;
             let last_activity_at = mine.iter().map(|i| i.updated_at).max();
-            LoopSpaceSummary {
+            let default_config = serde_json::from_str(&s.default_config).map_err(config_err)?;
+            Ok(LoopSpaceSummary {
                 id: s.id,
                 name: s.name,
                 folder_id: s.folder_id,
@@ -133,13 +142,10 @@ pub async fn list_spaces(
                 running_count,
                 last_activity_at,
                 created_at: s.created_at,
-                default_config: s
-                    .default_config
-                    .as_deref()
-                    .and_then(|j| serde_json::from_str(j).ok()),
-            }
+                default_config,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(summaries)
 }

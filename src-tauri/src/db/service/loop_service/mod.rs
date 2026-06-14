@@ -35,7 +35,7 @@ mod tests {
             "Fix webhook",
             "the body",
             IssuePriority::High,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();
@@ -67,7 +67,7 @@ mod tests {
             "I",
             "d",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();
@@ -127,7 +127,7 @@ mod tests {
             "I",
             "d",
             IssuePriority::Low,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();
@@ -181,7 +181,7 @@ mod tests {
             "I",
             "d",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();

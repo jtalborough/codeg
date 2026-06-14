@@ -190,7 +190,7 @@ mod tests {
             "Issue",
             "body",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();
@@ -302,7 +302,7 @@ mod tests {
             "Paused",
             "body",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap()

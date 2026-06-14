@@ -32,7 +32,7 @@ use crate::db::entities::loop_issue::{self, IssueStatus};
 use crate::db::entities::loop_iteration::{self, IterationStatus, Stage};
 use crate::db::service::{folder_service, loop_service};
 use crate::db::AppDatabase;
-use crate::models::loops::{IssueConfig, LoopArtifactRow, LoopDagView, ReviewerSpec};
+use crate::models::loops::{IssueConfig, LoopArtifactRow, LoopDagView, ReviewPassRule, ReviewerSpec};
 use crate::web::event_bridge::EventEmitter;
 
 use crate::loop_engine::dispatch::{dispatch_iteration, DispatchInput, LoopAgentSpawner};
@@ -596,7 +596,7 @@ async fn drive_reviews(
         }
     }
 
-    match aggregate(&config.review_pass_rule, reviewers, &decided) {
+    match aggregate(config.review_pass_rule, reviewers, &decided) {
         ReviewDecision::Pass => {
             cancel_active_reviews(db, spawner, &iters).await?;
             set_task_status_cas(db, task.id, ArtifactStatus::InProgress, ArtifactStatus::Done)
@@ -664,13 +664,13 @@ async fn drive_reviews(
 /// fail and accepts only when all `n` slots pass; `majority` accepts on
 /// `pass*2 > n` and rejects once a passing majority is unreachable (an even
 /// split rejects).
-fn aggregate(rule: &str, n: i32, verdicts: &[ReviewVerdict]) -> ReviewDecision {
+fn aggregate(rule: ReviewPassRule, n: i32, verdicts: &[ReviewVerdict]) -> ReviewDecision {
     let pass = verdicts
         .iter()
         .filter(|v| matches!(v, ReviewVerdict::Pass))
         .count() as i32;
     let fail = verdicts.len() as i32 - pass;
-    if rule == "majority" {
+    if rule == ReviewPassRule::Majority {
         if pass * 2 > n {
             ReviewDecision::Pass
         } else if fail * 2 >= n {
@@ -937,7 +937,7 @@ async fn finalize_iterations(
 mod tests {
     use super::*;
     use crate::acp::error::AcpError;
-    use crate::models::loops::ReviewerEntry;
+    use crate::models::loops::{ReviewerEntry, ReviewerInherit};
     use crate::db::entities::loop_artifact_revision::ActorKind;
     use crate::db::entities::loop_issue::{IssuePriority, IssueStatus};
     use crate::db::entities::loop_link::LinkKind;
@@ -1027,7 +1027,7 @@ mod tests {
             "Build",
             "do the thing",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();
@@ -1378,10 +1378,12 @@ mod tests {
 
     // ---- Task 2.3: review stage ----
 
-    fn config_reviewers(n: u32, rule: &str) -> IssueConfig {
+    fn config_reviewers(n: u32, rule: ReviewPassRule) -> IssueConfig {
         IssueConfig {
-            reviewer_count: n,
-            review_pass_rule: rule.to_string(),
+            reviewers: (0..n)
+                .map(|_| ReviewerEntry::Inherit(ReviewerInherit { inherit: true }))
+                .collect(),
+            review_pass_rule: rule,
             ..IssueConfig::default()
         }
     }
@@ -1443,7 +1445,7 @@ mod tests {
     async fn review_pass_marks_done_and_releases_gate() {
         let h = setup().await;
         let task = add_task(&h, "Task 1").await;
-        let cfg = config_reviewers(1, "unanimous");
+        let cfg = config_reviewers(1, ReviewPassRule::Unanimous);
         implement_to_in_progress(&h, &cfg, "feature.txt").await;
         assert_eq!(task_node(&h, task).await.status, ArtifactStatus::InProgress);
 
@@ -1516,7 +1518,7 @@ mod tests {
     async fn review_fail_reworks_with_findings() {
         let h = setup().await;
         let task = add_task(&h, "Task 1").await;
-        let cfg = config_reviewers(1, "unanimous");
+        let cfg = config_reviewers(1, ReviewPassRule::Unanimous);
         implement_to_in_progress(&h, &cfg, "feature.txt").await;
 
         assert!(drive_with(&h, &cfg).await);
@@ -1557,7 +1559,7 @@ mod tests {
     async fn unanimous_fail_fast_cancels_other_reviewers() {
         let h = setup().await;
         let task = add_task(&h, "Task 1").await;
-        let cfg = config_reviewers(2, "unanimous");
+        let cfg = config_reviewers(2, ReviewPassRule::Unanimous);
         implement_to_in_progress(&h, &cfg, "feature.txt").await;
 
         // Dispatch both review slots.
@@ -1746,7 +1748,7 @@ mod tests {
     async fn finalize_produces_result_and_results_from_edges() {
         let h = setup().await;
         let task = add_task(&h, "Task 1").await;
-        let cfg = config_reviewers(1, "unanimous");
+        let cfg = config_reviewers(1, ReviewPassRule::Unanimous);
         complete_task(&h, &cfg, "feature.txt", task).await;
         assert_eq!(
             load_issue(&h).await.active_task_artifact_id,
@@ -1800,7 +1802,7 @@ mod tests {
     async fn finalize_dirty_tree_blocks() {
         let h = setup().await;
         let task = add_task(&h, "Task 1").await;
-        let cfg = config_reviewers(1, "unanimous");
+        let cfg = config_reviewers(1, ReviewPassRule::Unanimous);
         complete_task(&h, &cfg, "feature.txt", task).await;
 
         // Stray uncommitted file in the worktree.

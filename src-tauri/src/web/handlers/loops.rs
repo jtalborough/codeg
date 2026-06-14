@@ -71,7 +71,7 @@ pub async fn update_loop_space(
 #[serde(rename_all = "camelCase")]
 pub struct SetSpaceDefaultConfigParams {
     pub id: i32,
-    pub config: Option<IssueConfig>,
+    pub config: IssueConfig,
 }
 
 pub async fn set_loop_space_default_config(
@@ -155,9 +155,9 @@ pub async fn delete_loop_issue(
 #[serde(rename_all = "camelCase")]
 pub struct UpdateIssueConfigParams {
     pub id: i32,
-    pub config: IssueConfig,
+    /// `None` = inherit the space default.
+    pub config: Option<IssueConfig>,
     pub token_budget: Option<i64>,
-    pub config_inherits: bool,
 }
 
 pub async fn update_loop_issue_config(
@@ -170,7 +170,6 @@ pub async fn update_loop_issue_config(
         p.id,
         p.config,
         p.token_budget,
-        p.config_inherits,
     )
     .await?;
     Ok(Json(()))

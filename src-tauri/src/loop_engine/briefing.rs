@@ -458,7 +458,7 @@ mod tests {
             "Add login",
             "Users must be able to authenticate.",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();

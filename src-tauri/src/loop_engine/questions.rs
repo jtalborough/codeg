@@ -69,10 +69,14 @@ impl LoopEngine {
             .await
         {
             Ok(Some(issue)) => {
-                let config =
-                    crate::loop_engine::config_resolver::effective_config(&self.db.conn, &issue)
-                        .await;
-                resolve_agent(&config, iter.stage)
+                // Display-hint only (which agent's renderer the inbox opens). A
+                // broken config degrades the hint, not the question routing.
+                match crate::loop_engine::config_resolver::effective_config(&self.db.conn, &issue)
+                    .await
+                {
+                    Ok(config) => resolve_agent(&config, iter.stage),
+                    Err(_) => AgentType::ClaudeCode,
+                }
             }
             _ => AgentType::ClaudeCode,
         };
@@ -199,7 +203,7 @@ mod tests {
             "I",
             "b",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();

@@ -22,6 +22,8 @@ pub enum LoopError {
     Git(String),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid loop config: {0}")]
+    InvalidConfig(String),
     #[error("acp error: {0}")]
     Acp(String),
     #[error(transparent)]
@@ -66,6 +68,11 @@ impl From<LoopError> for AppCommandError {
                     .with_detail(m)
             }
             LoopError::InvalidInput(m) => AppCommandError::invalid_input(m),
+            LoopError::InvalidConfig(m) => AppCommandError::new(
+                AppErrorCode::InvalidInput,
+                "Invalid loop config",
+            )
+            .with_detail(m),
             LoopError::Acp(m) => AppCommandError::task_execution_failed(m),
             LoopError::Db(err) => {
                 AppCommandError::database_error("Database operation failed").with_detail(err.to_string())

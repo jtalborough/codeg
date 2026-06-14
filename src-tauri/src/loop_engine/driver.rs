@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use sea_orm::{ActiveEnum, ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio::sync::Notify;
 use tokio::time::{interval, Duration, MissedTickBehavior};
 
@@ -185,20 +185,9 @@ pub(crate) fn ready_nodes(dag: &LoopDagView, route: IssueRoute) -> Vec<FrontierI
 }
 
 /// Resolve the full agent spec (agent + startup mode + config) for a stage from
-/// the issue's Loop Contract: a stage-keyed override (e.g. `"implement"`) falls
-/// back to `"default"`, then to Claude Code with no extra mode/config.
+/// the issue's Loop Contract: the per-stage override if set, else `agents.default`.
 pub(crate) fn resolve_agent_spec(config: &IssueConfig, stage: Stage) -> AgentSpec {
-    let key = stage.to_value();
-    config
-        .agents
-        .get(&key)
-        .or_else(|| config.agents.get("default"))
-        .cloned()
-        .unwrap_or(AgentSpec {
-            agent: AgentType::ClaudeCode,
-            mode_id: None,
-            config_values: Default::default(),
-        })
+    config.agents.for_stage(stage).clone()
 }
 
 /// Just the agent type for a stage (e.g. to route a question to the right
@@ -319,7 +308,7 @@ pub(crate) async fn reconcile_orphaned_iterations<L: IterationLiveness>(
     // Opt-in stall watchdog threshold (None = off; the common case skips the
     // config read entirely once there is nothing running anyway, handled above).
     let stall_alert_secs = match loop_issue::Entity::find_by_id(issue_id).one(&db.conn).await? {
-        Some(issue) => effective_config(&db.conn, &issue).await.stall_alert_secs,
+        Some(issue) => effective_config(&db.conn, &issue).await?.stall_alert_secs,
         None => None,
     };
     for it in running {
@@ -422,7 +411,7 @@ pub(crate) async fn tick_once(
         return Ok(TickOutcome::Stop);
     }
 
-    let config = effective_config(conn, &issue).await;
+    let config = effective_config(conn, &issue).await?;
 
     let Some(worktree_folder_id) = issue.worktree_folder_id else {
         // No worktree yet (trigger sets it up before starting the driver). Can't
@@ -741,6 +730,7 @@ pub(crate) async fn run_driver(engine: Arc<LoopEngine>, issue_id: i32, wake: Arc
 mod tests {
     use super::*;
     use crate::acp::error::AcpError;
+    use sea_orm::ActiveEnum; // for `IssueStatus::*.to_value()` in test helpers
     use crate::db::entities::loop_artifact::ArtifactKind;
     use crate::db::entities::loop_inbox_item::{self, InboxStatus};
     use crate::db::entities::loop_issue::IssuePriority;
@@ -760,14 +750,11 @@ mod tests {
         let mut cfg = IssueConfig::default();
         let mut cv = std::collections::BTreeMap::new();
         cv.insert("reasoning".to_string(), "high".to_string());
-        cfg.agents.insert(
-            "implement".to_string(),
-            AgentSpec {
-                agent: AgentType::Codex,
-                mode_id: Some("auto".into()),
-                config_values: cv.clone(),
-            },
-        );
+        cfg.agents.implement = Some(AgentSpec {
+            agent: AgentType::Codex,
+            mode_id: Some("auto".into()),
+            config_values: cv.clone(),
+        });
         let spec = resolve_agent_spec(&cfg, Stage::Implement);
         assert_eq!(spec.agent, AgentType::Codex);
         assert_eq!(spec.mode_id.as_deref(), Some("auto"));
@@ -853,7 +840,7 @@ mod tests {
             "Issue",
             "body",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();

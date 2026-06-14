@@ -429,7 +429,7 @@ mod tests {
             "Build it",
             "do the thing",
             IssuePriority::Medium,
-            &IssueConfig::default(),
+            Some(&IssueConfig::default()),
         )
         .await
         .unwrap();
