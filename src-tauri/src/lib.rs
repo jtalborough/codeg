@@ -530,7 +530,12 @@ mod tauri_app {
                     // engine returns the watcher future and we spawn it here.
                     tauri::async_runtime::spawn(loop_engine.completion_watcher_task(loop_bus));
                     tauri::async_runtime::spawn(async move {
+                        // Recover interrupted work first (release stale leases,
+                        // restart drivers), then run the supervisor forever so a
+                        // driver that later dies is respawned and its issue never
+                        // silently stalls.
                         loop_engine.recover_on_boot().await;
+                        loop_engine.supervisor_task().await;
                     });
                 }
 

@@ -320,11 +320,13 @@ async fn async_main() {
     }
 
     // Reconcile interrupted loop iterations and restart drivers for every
-    // still-running issue. Idempotent (Task 1.7 fills the reconciliation).
+    // still-running issue, then supervise drivers forever (respawn any that die
+    // so a running issue never silently stalls). Idempotent.
     {
         let engine = loop_engine.clone();
         tokio::spawn(async move {
             engine.recover_on_boot().await;
+            engine.supervisor_task().await;
         });
     }
     // React to loop iteration turn-completions via the in-process event bus

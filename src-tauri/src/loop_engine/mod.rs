@@ -22,6 +22,7 @@ use tokio::task::AbortHandle;
 use crate::acp::internal_bus::InternalEventBus;
 use crate::acp::manager::ConnectionManager;
 use crate::acp::types::AcpEvent;
+use crate::db::entities::loop_issue::{self, IssueStatus};
 use crate::db::entities::loop_iteration::{self, IterationStatus};
 use crate::db::AppDatabase;
 use crate::web::event_bridge::EventEmitter;
@@ -159,6 +160,67 @@ impl LoopEngine {
         }
     }
 
+    /// Self-healing backstop: ensure every `running` issue has a live driver,
+    /// respawning any whose task is missing or has died (a per-issue driver that
+    /// panics out of its loop vanishes, but the issue stays `running` in the DB —
+    /// without this it would silently never advance again until the next boot).
+    /// Idempotent: `start_issue` is the single-instance guard, so this is safe to
+    /// call on a schedule. A finished-but-still-registered handle is dropped under
+    /// the same lock that observes it, so a concurrent legitimate (re)start can
+    /// never have its live handle evicted here.
+    pub async fn supervise_drivers(self: &Arc<Self>) {
+        let running = match loop_issue::Entity::find()
+            .filter(loop_issue::Column::Status.eq(IssueStatus::Running))
+            .all(&self.db.conn)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("[loop][supervisor] failed to list running issues: {e}");
+                return;
+            }
+        };
+        for issue in running {
+            let needs_spawn = {
+                let mut drivers = self.drivers.lock().await;
+                match drivers.get(&issue.id) {
+                    None => true,
+                    Some(h) if h.abort.is_finished() => {
+                        // Drop the stale handle while still holding the lock so
+                        // `start_issue`'s `contains_key` guard sees a clean slot.
+                        drivers.remove(&issue.id);
+                        true
+                    }
+                    Some(_) => false, // a live driver is already on it
+                }
+            };
+            if needs_spawn {
+                eprintln!(
+                    "[loop][supervisor] respawning driver for running issue {}",
+                    issue.id
+                );
+                self.start_issue(issue.id).await;
+            }
+        }
+    }
+
+    /// The periodic supervisor loop, spawned once at boot alongside the completion
+    /// watcher (same `subscribe-before-spawn` pattern is unneeded — it is a poll,
+    /// not an event subscriber). The 15s cadence is a heartbeat for a rare failure
+    /// (driver panic), not a cap on work. The first tick fires immediately, which
+    /// is a harmless idempotent pass right after `recover_on_boot`.
+    pub fn supervisor_task(self: &Arc<Self>) -> impl Future<Output = ()> + Send + 'static {
+        let engine = Arc::clone(self);
+        async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                engine.supervise_drivers().await;
+            }
+        }
+    }
+
     /// Subscribe to the in-process event bus synchronously and return the
     /// completion-watcher loop future; the caller spawns it with the
     /// mode-appropriate spawner (`tauri::async_runtime::spawn` from the desktop
@@ -282,5 +344,96 @@ impl LoopEngine {
         iteration_id: i32,
     ) -> Result<dispatch::SettleOutcome, LoopError> {
         dispatch::settle_iteration(&self.db, &self.emitter, iteration_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::entities::loop_issue::IssuePriority;
+    use crate::db::service::loop_service::{issue, space};
+    use crate::db::test_helpers::{fresh_in_memory_db, seed_folder};
+    use crate::loop_engine::transitions::cas_issue_status;
+    use crate::models::loops::IssueConfig;
+
+    #[tokio::test]
+    async fn supervisor_respawns_dead_driver_for_running_issue() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/loop-supervisor").await;
+        let space = space::create_space(&db.conn, "S", folder_id).await.unwrap();
+        let issue = issue::create_issue(
+            &db.conn,
+            space.id,
+            "I",
+            "b",
+            IssuePriority::Medium,
+            &IssueConfig::default(),
+        )
+        .await
+        .unwrap();
+        cas_issue_status(&db.conn, issue.row.id, IssueStatus::Pending, IssueStatus::Running)
+            .await
+            .unwrap();
+        let engine = LoopEngine::new(
+            db,
+            ConnectionManager::new(),
+            std::path::PathBuf::from("/tmp/loop-supervisor-data"),
+            EventEmitter::Noop,
+        );
+
+        // No driver registered — simulates one that panicked out / never started.
+        assert!(engine.drivers.lock().await.get(&issue.row.id).is_none());
+
+        engine.supervise_drivers().await;
+
+        // A live driver now backs the still-running issue (it idles harmlessly:
+        // the issue has no worktree folder in this test, so the tick parks).
+        let drivers = engine.drivers.lock().await;
+        let handle = drivers.get(&issue.row.id).expect("driver respawned");
+        assert!(!handle.abort.is_finished(), "respawned driver is live");
+    }
+
+    #[tokio::test]
+    async fn supervisor_leaves_live_driver_untouched() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/loop-supervisor2").await;
+        let space = space::create_space(&db.conn, "S", folder_id).await.unwrap();
+        let issue = issue::create_issue(
+            &db.conn,
+            space.id,
+            "I",
+            "b",
+            IssuePriority::Medium,
+            &IssueConfig::default(),
+        )
+        .await
+        .unwrap();
+        cas_issue_status(&db.conn, issue.row.id, IssueStatus::Pending, IssueStatus::Running)
+            .await
+            .unwrap();
+        let engine = LoopEngine::new(
+            db,
+            ConnectionManager::new(),
+            std::path::PathBuf::from("/tmp/loop-supervisor2-data"),
+            EventEmitter::Noop,
+        );
+
+        engine.start_issue(issue.row.id).await;
+        let first = engine
+            .drivers
+            .lock()
+            .await
+            .get(&issue.row.id)
+            .map(|h| h.abort.id());
+
+        // A second supervision pass must not replace the existing live driver.
+        engine.supervise_drivers().await;
+        let second = engine
+            .drivers
+            .lock()
+            .await
+            .get(&issue.row.id)
+            .map(|h| h.abort.id());
+        assert_eq!(first, second, "live driver is not respawned");
     }
 }
