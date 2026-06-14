@@ -671,6 +671,18 @@ pub(crate) async fn run_driver(engine: Arc<LoopEngine>, issue_id: i32, wake: Arc
         {
             eprintln!("[loop][driver] reconcile failed for issue {issue_id}: {e}");
         }
+        // §2.7 backfill: re-read and charge any iterations whose token total was
+        // left pending (session file wasn't flushed at settle time). Cheap —
+        // filtered by (issue_id, tokens_pending) on the new composite index.
+        if let Err(e) = crate::loop_engine::dispatch::reconcile_pending_tokens(
+            &engine.db,
+            &engine.emitter,
+            issue_id,
+        )
+        .await
+        {
+            eprintln!("[loop][tokens] reconcile failed for issue {issue_id}: {e}");
+        }
         match tick_once(
             &engine.db,
             &engine.data_dir,

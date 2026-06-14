@@ -493,6 +493,28 @@ async fn produced_artifact_ids(
         .collect())
 }
 
+/// Attempts to read the iteration's turn token total from its parsed session
+/// file, with a few short retries (the file may not be flushed the instant the
+/// turn-complete fires). `None` ⇒ unreadable after all retries (caller marks the
+/// iteration `tokens_pending` rather than charging a phantom 0). `Some(0)` is a
+/// *genuine* zero-token turn and is charged normally (§2.7).
+async fn read_turn_tokens(conn: &sea_orm::DatabaseConnection, conversation_id: i32) -> Option<i64> {
+    const ATTEMPTS: u32 = 5;
+    const BACKOFF_MS: u64 = 120;
+    for attempt in 0..ATTEMPTS {
+        if let Ok((detail, _)) = get_folder_conversation_core(conn, conversation_id).await {
+            // A parsed session with stats present is authoritative (incl. a real 0).
+            if let Some(stats) = detail.session_stats {
+                return Some(stats.total_tokens.unwrap_or(0) as i64);
+            }
+        }
+        if attempt + 1 < ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(BACKOFF_MS)).await;
+        }
+    }
+    None
+}
+
 /// §4.9 settlement: finalize a completed iteration. Re-parses the session file
 /// for token usage, succeeds the lease, and — when the run produced nothing —
 /// bumps the target node's rework counter + records a failure signature for the
@@ -545,26 +567,25 @@ pub async fn settle_iteration_as(
     }
 
     // ----- winner-only side effects -----
-    // §4.9 token settlement: re-parse the session file for usage. A missing or
-    // not-yet-written session file settles to 0 here; Task 6 hardens this into a
-    // bounded retry + `tokens_pending` so the budget never trips on a phantom 0.
-    let tokens_used = match iter.conversation_id {
-        Some(conv_id) => match get_folder_conversation_core(conn, conv_id).await {
-            Ok((detail, _)) => detail
-                .session_stats
-                .and_then(|s| s.total_tokens)
-                .unwrap_or(0) as i64,
-            Err(_) => 0,
-        },
-        None => 0,
+    // §4.9 token settlement (§2.7 hardened): read the turn's token total from the
+    // parsed session file with bounded retries. `None` ⇒ unreadable after all
+    // retries → mark the iteration `tokens_pending` and DON'T charge a phantom 0;
+    // the backfill sweep (`reconcile_pending_tokens`) re-reads and charges later.
+    let token_read: Option<i64> = match iter.conversation_id {
+        Some(conv_id) => read_turn_tokens(conn, conv_id).await,
+        None => Some(0), // no backing conversation ⇒ genuinely nothing to charge
     };
+    let tokens_used = token_read.unwrap_or(0);
+    let tokens_pending = token_read.is_none();
 
-    // Write the iteration's token total + accumulate into the issue.
     let mut am: loop_iteration::ActiveModel = iter.clone().into();
     am.tokens_used = Set(tokens_used);
+    am.tokens_pending = Set(tokens_pending);
     am.ended_at = Set(Some(Utc::now()));
     am.update(conn).await?;
-    if tokens_used > 0 {
+    // Accumulate ONLY a known, non-zero charge (a pending read never contaminates
+    // the issue total → the budget breaker can't false-trip on a phantom 0).
+    if !tokens_pending && tokens_used > 0 {
         loop_issue::Entity::update_many()
             .col_expr(
                 loop_issue::Column::TokenUsed,
@@ -660,6 +681,66 @@ pub async fn settle_iteration_as(
         tokens_used,
         made_progress,
     })
+}
+
+/// Re-read and charge any of an issue's settled iterations whose token total was
+/// left pending (the session file wasn't flushed at settle time, §2.7).
+/// Idempotent: clears `tokens_pending` only when the read now succeeds, and
+/// accumulates the recovered total into the issue before re-evaluating the
+/// budget breaker.
+///
+/// Boot backfill needs no separate wiring: after `recover_on_boot` restarts the
+/// per-issue drivers, each driver's first heartbeat runs this sweep, so a crash
+/// mid-settle is re-charged on the next tick.
+pub async fn reconcile_pending_tokens(
+    db: &AppDatabase,
+    emitter: &EventEmitter,
+    issue_id: i32,
+) -> Result<(), LoopError> {
+    let conn = &db.conn;
+    let pending = loop_iteration::Entity::find()
+        .filter(loop_iteration::Column::IssueId.eq(issue_id))
+        .filter(loop_iteration::Column::TokensPending.eq(true))
+        .all(conn)
+        .await?;
+    for it in pending {
+        let Some(conv_id) = it.conversation_id else {
+            // Nothing to read; clear the flag so it stops being swept.
+            clear_pending(conn, it.id, 0).await?;
+            continue;
+        };
+        if let Some(tokens) = read_turn_tokens(conn, conv_id).await {
+            clear_pending(conn, it.id, tokens).await?;
+            if tokens > 0 {
+                loop_issue::Entity::update_many()
+                    .col_expr(
+                        loop_issue::Column::TokenUsed,
+                        Expr::col(loop_issue::Column::TokenUsed).add(tokens),
+                    )
+                    .filter(loop_issue::Column::Id.eq(issue_id))
+                    .exec(conn)
+                    .await?;
+            }
+            trip_budget_if_exhausted(conn, issue_id, it.id).await?;
+            emit_changed(emitter, it.space_id, issue_id, it.id, "settled");
+        }
+    }
+    Ok(())
+}
+
+/// Stamp a recovered token total and clear the pending flag in one UPDATE.
+async fn clear_pending(
+    conn: &sea_orm::DatabaseConnection,
+    iter_id: i32,
+    tokens: i64,
+) -> Result<(), LoopError> {
+    loop_iteration::Entity::update_many()
+        .col_expr(loop_iteration::Column::TokensUsed, Expr::value(tokens))
+        .col_expr(loop_iteration::Column::TokensPending, Expr::value(false))
+        .filter(loop_iteration::Column::Id.eq(iter_id))
+        .exec(conn)
+        .await?;
+    Ok(())
 }
 
 /// Issue-level budget circuit breaker (§4.10). Once accumulated `token_used`
@@ -1100,6 +1181,43 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(node.attempt, 1, "no-progress bump applied exactly once across a double settle");
+    }
+
+    #[tokio::test]
+    async fn settle_marks_tokens_pending_when_session_unreadable() {
+        let (db, _d, space_id, issue_id, _f) = seed().await;
+        let iter = try_claim_iteration(
+            &db.conn,
+            IterationClaim {
+                space_id,
+                issue_id,
+                stage: Stage::Triage,
+                target_artifact_id: None,
+                slot_no: None,
+                capability_token: "t".into(),
+                attempt: 0,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // Link a non-existent conversation id so the session read fails every retry.
+        loop_iteration::Entity::update_many()
+            .col_expr(loop_iteration::Column::ConversationId, Expr::value(999_999))
+            .filter(loop_iteration::Column::Id.eq(iter.id))
+            .exec(&db.conn)
+            .await
+            .unwrap();
+        cas_iteration_status(&db.conn, iter.id, IterationStatus::Queued, IterationStatus::Running)
+            .await
+            .unwrap();
+
+        settle_iteration(&db, &EventEmitter::Noop, iter.id).await.unwrap();
+        let settled = iteration::get_iteration(&db.conn, iter.id).await.unwrap().unwrap();
+        assert_eq!(settled.status, IterationStatus::Succeeded);
+        assert!(settled.tokens_pending, "unreadable usage left pending, not charged 0");
+        let issue = loop_issue::Entity::find_by_id(issue_id).one(&db.conn).await.unwrap().unwrap();
+        assert_eq!(issue.token_used, 0, "no phantom 0-charge");
     }
 
     #[tokio::test]
