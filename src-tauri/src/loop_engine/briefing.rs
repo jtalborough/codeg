@@ -148,11 +148,13 @@ fn tool_contract(stage: Stage) -> &'static str {
         Stage::Plan => {
             "Call `loop_submit_artifacts` exactly once with the task breakdown (the \
              kind is inferred as `task`). List tasks in dependency order and put \
-             each task's own acceptance criteria in its `criteria`. Declare which \
-             requirement acceptance criteria each task delivers by listing their \
-             ordinals from the Requirements section in `covers` (e.g. \
-             `\"covers\": [\"R1.AC1\", \"R2.AC1\"]`) — EVERY listed ordinal must be \
-             covered by some task, or planning is redone. To make a task depend on \
+             each task's own acceptance criteria in its `criteria`. EVERY task MUST \
+             include a `covers` array naming the requirement acceptance ordinals it \
+             delivers (from the Requirements / Coverage contract sections), e.g. \
+             `\"covers\": [\"R1.AC1\", \"R2.AC1\"]`. Across all tasks, every \
+             acceptance ordinal listed in the Coverage contract MUST be covered by \
+             at least one task — a submission that leaves any uncovered is REJECTED \
+             and you must resubmit the complete task list. To make a task depend on \
              an earlier one, set its `depends_on` to a one-element array holding \
              that earlier task's 0-based index in this same submission (e.g. a task \
              waiting on the first → `\"depends_on\": [0]`). A reference may only \
@@ -474,6 +476,37 @@ pub async fn assemble_briefing(
                 render_requirements(&reqs, &ordinals, stage == Stage::Plan)
             ));
             components.push(json!({ "section": "requirements", "count": reqs.len() }));
+        }
+        // Plan only: an explicit flat checklist of EVERY acceptance ordinal the
+        // plan must cover. The per-requirement ordinals above are easy to miss when
+        // scattered; restating the full target set as one list makes the planner's
+        // `covers` complete on the first submission (an incomplete plan is rejected
+        // at submit time and must be resubmitted — see the tool contract).
+        if stage == Stage::Plan && !reqs.is_empty() {
+            let all_ords: Vec<String> = reqs
+                .iter()
+                .flat_map(|r| {
+                    r.criteria
+                        .iter()
+                        .filter(|c| c.kind == CriterionKind::Acceptance)
+                        .filter_map(|c| ordinals.get(&c.id).cloned())
+                })
+                .collect();
+            if !all_ords.is_empty() {
+                let list = all_ords
+                    .iter()
+                    .map(|o| format!("- {o}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                sections.push(format!(
+                    "# Coverage contract\nEvery task MUST declare a `covers` array. Together your \
+                     tasks MUST cover ALL {} acceptance ordinals below — a submission that leaves \
+                     any uncovered is rejected and you will be asked to resubmit:\n{list}",
+                    all_ords.len()
+                ));
+                components
+                    .push(json!({ "section": "coverage_contract", "count": all_ords.len() }));
+            }
         }
         // On a plan replan (a prior plan's tasks were superseded by the coverage
         // gate), call out the criteria still uncovered by ANY task so the new plan
@@ -914,6 +947,12 @@ mod tests {
         assert!(t.contains("[R1.AC1] alpha holds"), "plan enumerates ordinals");
         assert!(t.contains("[R2.AC1] beta holds"));
         assert!(t.contains("covers"), "plan tool contract explains covers");
+        // The coverage contract restates the full target set as one flat checklist.
+        assert!(t.contains("# Coverage contract"), "plan gets the coverage contract");
+        assert!(
+            t.contains("cover ALL 2 acceptance ordinals"),
+            "coverage contract states the full count"
+        );
     }
 
     #[tokio::test]

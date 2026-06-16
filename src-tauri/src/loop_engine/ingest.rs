@@ -465,23 +465,26 @@ async fn submit_artifacts(
         Vec::new()
     };
 
-    // Plan stage: the stable `R{i}.AC{j}` → criterion_id map, built from the
-    // single shared ordinal source so a task's `covers` references acceptance
-    // criteria by the same ordinals the driver's coverage gate and the planner
-    // briefing use. The agent never sees a DB id.
-    let covers_ordinals: HashMap<String, i32> = if kind == ArtifactKind::Task {
+    // Plan stage: the stable `R{i}.AC{j}` ordinals, built from the single shared
+    // ordinal source so a task's `covers` references acceptance criteria by the
+    // same ordinals the driver's coverage gate and the planner briefing use. The
+    // agent never sees a DB id. `acceptance_ordinals` keeps canonical order (so a
+    // missing-coverage list reads R1.AC1, R1.AC2, …); `covers_ordinals` is the
+    // ordinal→id lookup map.
+    let acceptance_ordinals: Vec<(String, i32)> = if kind == ArtifactKind::Task {
         let ordered =
             loop_service::coverage::acceptance_ordinals_for_issue(conn, it.issue_id).await?;
-        let mut map = HashMap::new();
+        let mut v = Vec::new();
         for (ri, (_req, crits)) in ordered.iter().enumerate() {
             for (ci, cid) in crits.iter().enumerate() {
-                map.insert(format!("R{}.AC{}", ri + 1, ci + 1), *cid);
+                v.push((format!("R{}.AC{}", ri + 1, ci + 1), *cid));
             }
         }
-        map
+        v
     } else {
-        HashMap::new()
+        Vec::new()
     };
+    let covers_ordinals: HashMap<String, i32> = acceptance_ordinals.iter().cloned().collect();
 
     // Validate every item's `depends_on` up-front, before any artifact is
     // written — a bad reference must abort the whole batch with no partial rows
@@ -516,6 +519,31 @@ async fn submit_artifacts(
     } else {
         vec![Vec::new(); items.len()]
     };
+
+    // Plan completeness (spec §3.3): every acceptance criterion must be covered by
+    // at least one task. Enforced up-front (no write) so an incomplete plan is
+    // REJECTED in the planner's own turn — it resubmits a complete one immediately,
+    // converging in-turn — instead of being accepted and then superseded next tick
+    // by the driver's coverage loop-back (which churns tasks and clutters the DAG).
+    // Only bites when the issue actually has acceptance criteria (the `direct`
+    // route has none, so `acceptance_ordinals` is empty and this is a no-op).
+    if kind == ArtifactKind::Task && !acceptance_ordinals.is_empty() {
+        let covered: std::collections::HashSet<i32> =
+            covers_per_item.iter().flatten().copied().collect();
+        let missing: Vec<&str> = acceptance_ordinals
+            .iter()
+            .filter(|(_, cid)| !covered.contains(cid))
+            .map(|(ord, _)| ord.as_str())
+            .collect();
+        if !missing.is_empty() {
+            return Err(invalid(format!(
+                "plan leaves these acceptance criteria uncovered: {}. Every \
+                 acceptance ordinal must be covered by at least one task's `covers`; \
+                 resubmit the complete task list covering all of them.",
+                missing.join(", ")
+            )));
+        }
+    }
 
     let status = default_status_for_kind(kind);
     // One transaction for the whole batch: artifacts + revisions + criteria +
@@ -1126,6 +1154,67 @@ mod tests {
             "no tasks written"
         );
         assert_eq!(dag.coverage.len(), 0, "no coverage written");
+    }
+
+    #[tokio::test]
+    async fn plan_incomplete_coverage_rejected_then_resubmit_succeeds() {
+        let (db, space, issue, root) = seed().await;
+        // Two requirements, each one acceptance criterion → ordinals R1.AC1, R2.AC1.
+        let _ = running_iter(&db.conn, space, issue, Stage::Refine, Some(root), "tok-r").await;
+        ingest(
+            &db.conn,
+            "tok-r",
+            "loop_submit_artifacts",
+            &json!({
+                "artifacts": [
+                    {"title": "Req A", "content": "shall A", "criteria": ["A1"]},
+                    {"title": "Req B", "content": "shall B", "criteria": ["B1"]}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+        // A plan covering only R1.AC1 leaves R2.AC1 uncovered → rejected in-turn,
+        // nothing written (the planner's iteration stays running so it can resubmit).
+        let _ = running_iter(&db.conn, space, issue, Stage::Plan, Some(root), "tok-p").await;
+        let err = ingest(
+            &db.conn,
+            "tok-p",
+            "loop_submit_artifacts",
+            &json!({"artifacts": [{"title": "T1", "content": "do A", "covers": ["R1.AC1"]}]}),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LoopError::InvalidInput(_)));
+        let dag = loop_service::artifact::list_dag(&db.conn, issue).await.unwrap();
+        assert_eq!(
+            dag.artifacts
+                .iter()
+                .filter(|a| matches!(a.kind, ArtifactKind::Task))
+                .count(),
+            0,
+            "incomplete plan wrote no tasks"
+        );
+        assert_eq!(dag.coverage.len(), 0, "no coverage written");
+
+        // Same turn (same token): resubmit covering BOTH ordinals → accepted.
+        let out = ingest(
+            &db.conn,
+            "tok-p",
+            "loop_submit_artifacts",
+            &json!({
+                "artifacts": [
+                    {"title": "T1", "content": "do A", "covers": ["R1.AC1"]},
+                    {"title": "T2", "content": "do B", "covers": ["R2.AC1"]}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["ids"].as_array().unwrap().len(), 2);
+        let dag = loop_service::artifact::list_dag(&db.conn, issue).await.unwrap();
+        assert_eq!(dag.coverage.len(), 2, "complete resubmit records full coverage");
     }
 
     #[tokio::test]
