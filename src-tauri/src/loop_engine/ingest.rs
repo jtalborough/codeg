@@ -259,6 +259,7 @@ pub async fn ingest(
         "loop_submit_review" => submit_review(conn, &it, payload).await,
         "loop_report_blocked" => report_blocked(conn, &it, payload).await,
         "loop_record_memory" => record_memory(conn, &it, payload).await,
+        "loop_read_memory" => read_memory(conn, &it, payload).await,
         other => Err(invalid(format!("unknown loop tool: {other}"))),
     }
 }
@@ -838,6 +839,82 @@ fn injected_criteria(it: &loop_iteration::Model) -> Result<HashMap<String, i32>,
     Ok(out)
 }
 
+/// The `{ "M{n}": memory_id }` map the briefing stashed into the iteration's
+/// `context_manifest` at dispatch. Read handles resolve against THIS — never a
+/// recompute — so a concurrent create/supersede can't drift what was shown.
+/// Absent/malformed `memory_index` ⇒ empty map (every handle becomes `not_found`).
+fn injected_memory_index(it: &loop_iteration::Model) -> Result<HashMap<String, i32>, LoopError> {
+    let Some(raw) = it.context_manifest.as_deref() else {
+        return Ok(HashMap::new());
+    };
+    let manifest: Value =
+        serde_json::from_str(raw).map_err(|e| invalid(format!("manifest parse: {e}")))?;
+    let Some(obj) = manifest.get("memory_index").and_then(|v| v.as_object()) else {
+        return Ok(HashMap::new());
+    };
+    Ok(obj
+        .iter()
+        .filter_map(|(k, v)| v.as_i64().map(|id| (k.clone(), id as i32)))
+        .collect())
+}
+
+/// `loop_read_memory`: a pure, batch read. The agent passes as many `[M{n}]`
+/// handles from its briefing's Memory index as it judges relevant in one call;
+/// each resolves against the stashed manifest, and resolved ids are fetched via
+/// `get_for_read` (re-scoped to this space + active + non-constitution). A handle
+/// that is unknown to the manifest OR resolves to a row that left the recall path
+/// (archived/superseded/cross-space) comes back in `not_found` — never silently
+/// dropped. Writes nothing.
+async fn read_memory(
+    conn: &DatabaseConnection,
+    it: &loop_iteration::Model,
+    payload: &Value,
+) -> Result<Value, LoopError> {
+    let handles: Vec<String> = payload
+        .get("handles")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|h| h.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if handles.is_empty() {
+        return Err(invalid("loop_read_memory requires a non-empty `handles` array"));
+    }
+    let index = injected_memory_index(it)?;
+    // Resolve handles → ids against the stored manifest; unknown → not_found.
+    let mut wanted: Vec<(String, i32)> = Vec::new();
+    let mut not_found: Vec<String> = Vec::new();
+    for h in handles {
+        match index.get(&h) {
+            Some(id) => wanted.push((h, *id)),
+            None => not_found.push(h),
+        }
+    }
+    let ids: Vec<i32> = wanted.iter().map(|(_, id)| *id).collect();
+    let rows = loop_service::memory::get_for_read(conn, it.space_id, &ids).await?;
+    let by_id: HashMap<i32, _> = rows.into_iter().map(|m| (m.id, m)).collect();
+    let mut memories: Vec<Value> = Vec::new();
+    for (handle, id) in wanted {
+        match by_id.get(&id) {
+            // Resolved to a live, in-space, active memory → return it in full.
+            Some(m) => memories.push(json!({
+                "handle": handle,
+                "kind": m.kind,
+                "trust": m.trust_tier,
+                "title": m.title,
+                "summary": m.summary,
+                "content": m.content,
+                "source_issue_id": m.source_issue_id,
+                "source_artifact_id": m.source_artifact_id,
+                "produced_by_iteration_id": m.produced_by_iteration_id,
+            })),
+            // In the manifest but no live row — archived/superseded/deleted since
+            // dispatch, or a cross-space id get_for_read filtered out — is a
+            // not_found receipt (NEVER silently dropped).
+            None => not_found.push(handle),
+        }
+    }
+    Ok(json!({ "ok": true, "memories": memories, "not_found": not_found }))
+}
+
 /// Lowercase wire token for a derived review verdict.
 fn review_verdict_str(v: ReviewVerdict) -> &'static str {
     match v {
@@ -904,13 +981,20 @@ async fn record_memory(
     if content.trim().is_empty() {
         return Err(invalid("memory content is empty"));
     }
+    // Optional one-line summary for the briefing index — collapse any whitespace
+    // so a multiline summary can't break the one-line-per-memory layout.
+    let summary = payload
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|s| !s.is_empty());
     let m = loop_service::memory::create_memory(
         conn,
         it.space_id,
         kind,
         ActorKind::Agent,
         title,
-        None,
+        summary.as_deref(),
         &truncate(content),
         TrustTier::Proposed,
         loop_service::memory::MemoryProvenance {
@@ -1695,5 +1779,172 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, LoopError::InvalidInput(_)));
+    }
+
+    // ---- P3 memory recall (loop_read_memory) ----
+
+    /// Stash a `{ "M{n}": id }` map under `memory_index` — what assemble_briefing
+    /// emits at dispatch.
+    async fn set_memory_index(conn: &DatabaseConnection, iter_id: i32, map: Value) {
+        loop_iteration::Entity::update_many()
+            .col_expr(
+                loop_iteration::Column::ContextManifest,
+                sea_orm::sea_query::Expr::value(json!({ "memory_index": map }).to_string()),
+            )
+            .filter(loop_iteration::Column::Id.eq(iter_id))
+            .exec(conn)
+            .await
+            .unwrap();
+    }
+
+    async fn mk_memory(
+        conn: &DatabaseConnection,
+        space_id: i32,
+        kind: MemoryKind,
+        title: &str,
+        summary: Option<&str>,
+    ) -> i32 {
+        loop_service::memory::create_memory(
+            conn,
+            space_id,
+            kind,
+            ActorKind::Agent,
+            title,
+            summary,
+            "full body",
+            TrustTier::Proposed,
+            loop_service::memory::MemoryProvenance::default(),
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    async fn fetch_memory(
+        conn: &DatabaseConnection,
+        id: i32,
+    ) -> crate::db::entities::loop_memory::Model {
+        crate::db::entities::loop_memory::Entity::find_by_id(id)
+            .one(conn)
+            .await
+            .unwrap()
+            .expect("memory row")
+    }
+
+    #[tokio::test]
+    async fn read_memory_returns_full_content_and_not_found_receipt() {
+        let (db, space, issue, root) = seed().await;
+        let m1 =
+            mk_memory(&db.conn, space, MemoryKind::Decision, "Token store", Some("use keyring")).await;
+        let m2 = mk_memory(&db.conn, space, MemoryKind::Pitfall, "Flaky test", None).await;
+        let iter = running_iter(&db.conn, space, issue, Stage::Refine, Some(root), "tok-read").await;
+        set_memory_index(&db.conn, iter, json!({ "M1": m1, "M2": m2 })).await;
+
+        let before = fetch_memory(&db.conn, m1).await.updated_at;
+        let out = ingest(&db.conn, "tok-read", "loop_read_memory", &json!({"handles":["M1","M99"]}))
+            .await
+            .unwrap();
+        let mems = out["memories"].as_array().unwrap();
+        assert_eq!(mems.len(), 1);
+        assert_eq!(mems[0]["handle"], "M1");
+        assert_eq!(mems[0]["title"], "Token store");
+        assert_eq!(mems[0]["summary"], "use keyring");
+        assert_eq!(mems[0]["content"], "full body");
+        assert_eq!(mems[0]["trust"], "proposed");
+        assert_eq!(mems[0]["kind"], "decision");
+        // Provenance keys are always emitted (null here) — incl. source_artifact_id.
+        assert!(mems[0].as_object().unwrap().contains_key("source_artifact_id"));
+        assert_eq!(out["not_found"], json!(["M99"]));
+        // Pure read: M1's updated_at is untouched.
+        assert_eq!(fetch_memory(&db.conn, m1).await.updated_at, before);
+    }
+
+    #[tokio::test]
+    async fn read_memory_empty_handles_is_error() {
+        let (db, space, issue, root) = seed().await;
+        let iter = running_iter(&db.conn, space, issue, Stage::Refine, Some(root), "tok-empty").await;
+        set_memory_index(&db.conn, iter, json!({})).await;
+        let err = ingest(&db.conn, "tok-empty", "loop_read_memory", &json!({"handles":[]}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LoopError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn read_memory_without_index_returns_all_not_found() {
+        let (db, space, issue, root) = seed().await;
+        let _ = running_iter(&db.conn, space, issue, Stage::Refine, Some(root), "tok-noidx").await;
+        // No set_memory_index: the manifest carries no memory_index object.
+        let out = ingest(&db.conn, "tok-noidx", "loop_read_memory", &json!({"handles":["M1","M2"]}))
+            .await
+            .unwrap();
+        assert!(out["memories"].as_array().unwrap().is_empty());
+        assert_eq!(out["not_found"], json!(["M1", "M2"]));
+    }
+
+    #[tokio::test]
+    async fn read_memory_superseded_since_dispatch_is_not_found() {
+        let (db, space, issue, root) = seed().await;
+        let m1 = mk_memory(&db.conn, space, MemoryKind::Decision, "Was active", None).await;
+        let iter = running_iter(&db.conn, space, issue, Stage::Refine, Some(root), "tok-gone").await;
+        set_memory_index(&db.conn, iter, json!({ "M1": m1 })).await;
+        // Left the recall path AFTER dispatch — the handle resolves but get_for_read
+        // returns no row, so it is reported (never silently dropped).
+        loop_service::memory::update_memory(
+            &db.conn,
+            m1,
+            "Was active",
+            "full body",
+            crate::db::entities::loop_memory::MemoryStatus::Superseded,
+        )
+        .await
+        .unwrap();
+        let out = ingest(&db.conn, "tok-gone", "loop_read_memory", &json!({"handles":["M1"]}))
+            .await
+            .unwrap();
+        assert!(out["memories"].as_array().unwrap().is_empty());
+        assert_eq!(out["not_found"], json!(["M1"]));
+    }
+
+    #[tokio::test]
+    async fn read_memory_cross_space_handle_is_not_found() {
+        let (db, space, issue, root) = seed().await;
+        // A memory in a DIFFERENT space, forced into this iteration's manifest.
+        let other_folder = seed_folder(&db, "/repo-other").await;
+        let other = loop_service::space::create_space(&db.conn, "Other", other_folder)
+            .await
+            .unwrap();
+        let foreign = mk_memory(&db.conn, other.id, MemoryKind::Decision, "Foreign", None).await;
+        let iter =
+            running_iter(&db.conn, space, issue, Stage::Refine, Some(root), "tok-xspace").await;
+        set_memory_index(&db.conn, iter, json!({ "M1": foreign })).await;
+        let out = ingest(&db.conn, "tok-xspace", "loop_read_memory", &json!({"handles":["M1"]}))
+            .await
+            .unwrap();
+        // get_for_read re-scopes by it.space_id → no row → not_found.
+        assert!(out["memories"].as_array().unwrap().is_empty());
+        assert_eq!(out["not_found"], json!(["M1"]));
+    }
+
+    #[tokio::test]
+    async fn record_memory_persists_one_line_summary_and_provenance() {
+        let (db, space, issue, root) = seed().await;
+        let iter = running_iter(&db.conn, space, issue, Stage::Refine, Some(root), "tok-rec").await;
+        let out = ingest(
+            &db.conn,
+            "tok-rec",
+            "loop_record_memory",
+            &json!({"kind":"decision","title":"T","summary":"line one\n   line two","content":"body"}),
+        )
+        .await
+        .unwrap();
+        let id = out["id"].as_i64().unwrap() as i32;
+        let m = fetch_memory(&db.conn, id).await;
+        // Multiline summary collapsed to one line.
+        assert_eq!(m.summary.as_deref(), Some("line one line two"));
+        assert_eq!(m.trust_tier, TrustTier::Proposed);
+        assert_eq!(m.source_issue_id, Some(issue));
+        assert_eq!(m.produced_by_iteration_id, Some(iter));
+        assert_eq!(m.source_artifact_id, None);
     }
 }

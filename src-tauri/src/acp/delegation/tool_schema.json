@@ -250,9 +250,28 @@
           "type": "string",
           "description": "Short title for the memory."
         },
+        "summary": {
+          "type": "string",
+          "description": "Optional one-line summary shown in future briefings' Memory index (the full content is read on demand)."
+        },
         "content": {
           "type": "string",
           "description": "The lesson, stated so a future agent can apply it without this context."
+        }
+      }
+    }
+  },
+  {
+    "name": "loop_read_memory",
+    "description": "Loop engineering — batch-read the full content of memories from your briefing's Memory index by their [M{n}] handles. Pass as MANY handles as you judge relevant in a SINGLE call — you decide how many. Returns each memory's full text and metadata; handles not in your index are returned under not_found. Read-only: to record a new memory use loop_record_memory.",
+    "inputSchema": {
+      "type": "object",
+      "required": ["handles"],
+      "properties": {
+        "handles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "One or more memory handles exactly as shown in the Memory index — batch as many as you want, e.g. [\"M1\",\"M4\",\"M7\"]."
         }
       }
     }
