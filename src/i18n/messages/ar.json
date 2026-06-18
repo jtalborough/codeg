@@ -3065,6 +3065,10 @@
       "noChanges": "لا تغييرات.",
       "linkedHeading": "التكرار المرتبط",
       "producedBy": "أنتجها التكرار رقم {id}",
+      "targetingHeading": "التكرارات على هذا العنصر",
+      "attentionHeading": "يتطلب انتباهك",
+      "openSession": "فتح الجلسة",
+      "attempt": "المحاولة {n}",
       "gateDesignPrompt": "هذا التصميم بانتظار موافقتك.",
       "gateMergePrompt": "هذه النتيجة جاهزة للدمج."
     },
@@ -3100,7 +3104,10 @@
       "kindReflectFailed": "تم تخطّي تأمل الذاكرة",
       "reflectFailedDesc": "لم يكتمل توحيد الذاكرة لهذه المسألة بعد محاولات متكررة. المسألة مدمجة وغير متأثرة؛ هذا الإشعار للعلم فقط.",
       "dismiss": "تجاهل",
-      "sectionNotices": "إشعارات"
+      "sectionNotices": "إشعارات",
+      "attempt": "المحاولة {n}",
+      "locateInGraph": "تحديد الموقع في الرسم",
+      "openSession": "فتح الجلسة"
     },
     "iteration": {
       "title": "جلسة التكرار",
@@ -3166,6 +3173,30 @@
       "interrupted": "مقاطعة",
       "cancelled": "أُلغيت"
     },
+    "iterationOutcome": {
+      "succeeded": "نجح",
+      "empty_diff": "لا تغييرات",
+      "validation_failed": "فشل التحقق",
+      "declared_complete": "أُعلن اكتماله",
+      "no_artifacts": "لا عناصر",
+      "abandoned": "متروك"
+    },
+    "failureSig": {
+      "emptyDiff": "لم يُجرِ الوكيل أي تغييرات على الملفات.",
+      "validationFailed": "فشلت أوامر التحقق.",
+      "noArtifacts": "لم يُنتج الوكيل أي عناصر.",
+      "infraFailure": "أوقف خطأ في البنية التحتية التشغيل.",
+      "stalled": "استمر التكرار دون أن يكتمل.",
+      "maxAttempts": "توقّف بعد الحد الأقصى من المحاولات.",
+      "repeatedFailure": "تكرّر الفشل نفسه.",
+      "validationUnrunnable": "تعذّر تشغيل أوامر التحقق.",
+      "dependencyUnsatisfiable": "لا يمكن تلبية إحدى تبعيات المهمة أبدًا.",
+      "worktreeUnavailable": "شجرة العمل غير متاحة.",
+      "worktreeDirty": "كانت شجرة العمل تحتوي على تغييرات غير مُلتزمة قبل الإنهاء.",
+      "noIntegrationCriteria": "لم تُحدَّد معايير التكامل.",
+      "integrationGap": "استمر فشل التحقق من التكامل.",
+      "designRejected": "رُفض التصميم مرّات كثيرة."
+    },
     "memoryKind": {
       "constitution": "دستور",
       "constraint": "قيد",
@@ -3196,6 +3227,10 @@
     "artifactList": {
       "empty": "لا توجد عناصر بعد.",
       "fromIteration": "تكرار #{id}"
+    },
+    "attention": {
+      "blocking": "{count} معطّل",
+      "notice": "{count} إشعار"
     },
     "boardView": {
       "empty": "لا توجد عناصر بعد."
@@ -3269,7 +3304,8 @@
     },
     "dag": {
       "running": "قيد التشغيل",
-      "queued": "في قائمة الانتظار"
+      "queued": "في قائمة الانتظار",
+      "attention": "{count, plural, other {# عنصرًا بحاجة إليك}}"
     },
     "stageRail": {
       "statusDone": "تم",

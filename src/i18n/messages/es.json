@@ -3065,6 +3065,10 @@
       "noChanges": "Sin cambios.",
       "linkedHeading": "Iteración vinculada",
       "producedBy": "Producido por la iteración n.º {id}",
+      "targetingHeading": "Iteraciones sobre este artefacto",
+      "attentionHeading": "Requiere atención",
+      "openSession": "Abrir sesión",
+      "attempt": "Intento {n}",
       "gateDesignPrompt": "Este diseño está esperando tu aprobación.",
       "gateMergePrompt": "Este resultado está listo para fusionarse."
     },
@@ -3100,7 +3104,10 @@
       "kindReflectFailed": "Reflexión de memoria omitida",
       "reflectFailedDesc": "La consolidación de memoria de esta incidencia no se completó tras varios intentos. La incidencia está fusionada y no se ve afectada; este aviso es informativo.",
       "dismiss": "Descartar",
-      "sectionNotices": "Avisos"
+      "sectionNotices": "Avisos",
+      "attempt": "Intento {n}",
+      "locateInGraph": "Ubicar en el grafo",
+      "openSession": "Abrir sesión"
     },
     "iteration": {
       "title": "Sesión de iteración",
@@ -3166,6 +3173,30 @@
       "interrupted": "Interrumpida",
       "cancelled": "Cancelada"
     },
+    "iterationOutcome": {
+      "succeeded": "Correcto",
+      "empty_diff": "Sin cambios",
+      "validation_failed": "Validación fallida",
+      "declared_complete": "Declarado completo",
+      "no_artifacts": "Sin artefactos",
+      "abandoned": "Abandonado"
+    },
+    "failureSig": {
+      "emptyDiff": "El agente no produjo cambios en archivos.",
+      "validationFailed": "Los comandos de validación fallaron.",
+      "noArtifacts": "El agente no produjo artefactos.",
+      "infraFailure": "Un error de infraestructura interrumpió la ejecución.",
+      "stalled": "La iteración se ejecutó sin completarse.",
+      "maxAttempts": "Detenido tras el máximo de intentos.",
+      "repeatedFailure": "El mismo fallo se repitió.",
+      "validationUnrunnable": "No se pudieron ejecutar los comandos de validación.",
+      "dependencyUnsatisfiable": "Una dependencia de tarea nunca podrá satisfacerse.",
+      "worktreeUnavailable": "El árbol de trabajo no estaba disponible.",
+      "worktreeDirty": "El árbol de trabajo tenía cambios sin confirmar antes de finalizar.",
+      "noIntegrationCriteria": "No se definieron criterios de integración.",
+      "integrationGap": "La verificación de integración siguió fallando.",
+      "designRejected": "El diseño fue rechazado demasiadas veces."
+    },
     "memoryKind": {
       "constitution": "Constitución",
       "constraint": "Restricción",
@@ -3196,6 +3227,10 @@
     "artifactList": {
       "empty": "Aún no hay artefactos.",
       "fromIteration": "iter. n.º {id}"
+    },
+    "attention": {
+      "blocking": "{count} bloqueando",
+      "notice": "{count} aviso"
     },
     "boardView": {
       "empty": "Aún no hay artefactos."
@@ -3269,7 +3304,8 @@
     },
     "dag": {
       "running": "En curso",
-      "queued": "En cola"
+      "queued": "En cola",
+      "attention": "{count, plural, one {# elemento te necesita} other {# elementos te necesitan}}"
     },
     "stageRail": {
       "statusDone": "Hecho",

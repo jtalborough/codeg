@@ -3065,6 +3065,10 @@
       "noChanges": "変更なし。",
       "linkedHeading": "関連イテレーション",
       "producedBy": "イテレーション #{id} が生成",
+      "targetingHeading": "このアーティファクトの反復",
+      "attentionHeading": "要対応",
+      "openSession": "セッションを開く",
+      "attempt": "{n} 回目の試行",
       "gateDesignPrompt": "この設計は承認待ちです。",
       "gateMergePrompt": "この成果はマージ可能です。"
     },
@@ -3100,7 +3104,10 @@
       "kindReflectFailed": "メモリの振り返りをスキップ",
       "reflectFailedDesc": "この課題のメモリ統合は、繰り返し試行しても完了しませんでした。課題はマージ済みで影響はありません。これは情報提供のみのお知らせです。",
       "dismiss": "閉じる",
-      "sectionNotices": "お知らせ"
+      "sectionNotices": "お知らせ",
+      "attempt": "{n} 回目の試行",
+      "locateInGraph": "グラフ内で表示",
+      "openSession": "セッションを開く"
     },
     "iteration": {
       "title": "イテレーションセッション",
@@ -3166,6 +3173,30 @@
       "interrupted": "中断",
       "cancelled": "キャンセル済み"
     },
+    "iterationOutcome": {
+      "succeeded": "成功",
+      "empty_diff": "変更なし",
+      "validation_failed": "検証失敗",
+      "declared_complete": "完了宣言",
+      "no_artifacts": "成果物なし",
+      "abandoned": "中止"
+    },
+    "failureSig": {
+      "emptyDiff": "エージェントはファイルを変更しませんでした。",
+      "validationFailed": "検証コマンドが失敗しました。",
+      "noArtifacts": "エージェントは成果物を生成しませんでした。",
+      "infraFailure": "インフラのエラーで実行が中断されました。",
+      "stalled": "反復は実行されましたが完了しませんでした。",
+      "maxAttempts": "最大試行回数に達して停止しました。",
+      "repeatedFailure": "同じ失敗が繰り返されました。",
+      "validationUnrunnable": "検証コマンドを実行できませんでした。",
+      "dependencyUnsatisfiable": "タスクの依存関係が決して満たされません。",
+      "worktreeUnavailable": "ワークツリーを利用できませんでした。",
+      "worktreeDirty": "ファイナライズ前にワークツリーに未コミットの変更がありました。",
+      "noIntegrationCriteria": "統合基準が定義されていませんでした。",
+      "integrationGap": "統合検証が失敗し続けました。",
+      "designRejected": "設計が何度も却下されました。"
+    },
     "memoryKind": {
       "constitution": "憲章",
       "constraint": "制約",
@@ -3196,6 +3227,10 @@
     "artifactList": {
       "empty": "成果物はまだありません。",
       "fromIteration": "イテレーション #{id}"
+    },
+    "attention": {
+      "blocking": "{count} 件ブロック中",
+      "notice": "{count} 件の通知"
     },
     "boardView": {
       "empty": "成果物はまだありません。"
@@ -3269,7 +3304,8 @@
     },
     "dag": {
       "running": "実行中",
-      "queued": "待機中"
+      "queued": "待機中",
+      "attention": "{count, plural, other {# 件の要対応}}"
     },
     "stageRail": {
       "statusDone": "完了",

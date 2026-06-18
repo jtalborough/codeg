@@ -3065,6 +3065,10 @@
       "noChanges": "No changes.",
       "linkedHeading": "Linked iteration",
       "producedBy": "Produced by iteration #{id}",
+      "targetingHeading": "Iterations on this artifact",
+      "attentionHeading": "Needs attention",
+      "openSession": "Open session",
+      "attempt": "Attempt {n}",
       "gateDesignPrompt": "This design is awaiting your approval.",
       "gateMergePrompt": "This result is ready to merge."
     },
@@ -3100,7 +3104,10 @@
       "kindReflectFailed": "Memory reflection skipped",
       "reflectFailedDesc": "Memory consolidation for this issue didn't complete after repeated attempts. The issue is merged and unaffected; this notice is informational.",
       "dismiss": "Dismiss",
-      "sectionNotices": "Notices"
+      "sectionNotices": "Notices",
+      "attempt": "Attempt {n}",
+      "locateInGraph": "Locate in graph",
+      "openSession": "Open session"
     },
     "iteration": {
       "title": "Iteration session",
@@ -3166,6 +3173,30 @@
       "interrupted": "Interrupted",
       "cancelled": "Cancelled"
     },
+    "iterationOutcome": {
+      "succeeded": "Succeeded",
+      "empty_diff": "No changes",
+      "validation_failed": "Validation failed",
+      "declared_complete": "Declared complete",
+      "no_artifacts": "No artifacts",
+      "abandoned": "Abandoned"
+    },
+    "failureSig": {
+      "emptyDiff": "The agent produced no file changes.",
+      "validationFailed": "The validation commands failed.",
+      "noArtifacts": "The agent produced no artifacts.",
+      "infraFailure": "An infrastructure error interrupted the run.",
+      "stalled": "The iteration ran without completing.",
+      "maxAttempts": "Stopped after the maximum attempts.",
+      "repeatedFailure": "The same failure repeated.",
+      "validationUnrunnable": "The validation commands could not be run.",
+      "dependencyUnsatisfiable": "A task dependency can never be satisfied.",
+      "worktreeUnavailable": "The work tree was unavailable.",
+      "worktreeDirty": "The work tree had uncommitted changes before finalize.",
+      "noIntegrationCriteria": "No integration criteria were defined.",
+      "integrationGap": "Integration verification kept failing.",
+      "designRejected": "The design was rejected too many times."
+    },
     "memoryKind": {
       "constitution": "Constitution",
       "constraint": "Constraint",
@@ -3196,6 +3227,10 @@
     "artifactList": {
       "empty": "No artifacts yet.",
       "fromIteration": "iter #{id}"
+    },
+    "attention": {
+      "blocking": "{count} blocking",
+      "notice": "{count} notice"
     },
     "boardView": {
       "empty": "No artifacts yet."
@@ -3269,7 +3304,8 @@
     },
     "dag": {
       "running": "Running",
-      "queued": "Queued"
+      "queued": "Queued",
+      "attention": "{count, plural, one {# item needs you} other {# items need you}}"
     },
     "stageRail": {
       "statusDone": "Done",

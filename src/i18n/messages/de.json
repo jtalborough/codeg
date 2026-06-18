@@ -3065,6 +3065,10 @@
       "noChanges": "Keine Änderungen.",
       "linkedHeading": "Verknüpfte Iteration",
       "producedBy": "Erzeugt von Iteration #{id}",
+      "targetingHeading": "Iterationen zu diesem Artefakt",
+      "attentionHeading": "Erfordert Aufmerksamkeit",
+      "openSession": "Sitzung öffnen",
+      "attempt": "Versuch {n}",
       "gateDesignPrompt": "Dieser Entwurf wartet auf deine Freigabe.",
       "gateMergePrompt": "Dieses Ergebnis kann zusammengeführt werden."
     },
@@ -3100,7 +3104,10 @@
       "kindReflectFailed": "Speicher-Reflexion übersprungen",
       "reflectFailedDesc": "Die Speicher-Konsolidierung für dieses Issue wurde nach mehreren Versuchen nicht abgeschlossen. Das Issue ist zusammengeführt und nicht betroffen; dieser Hinweis dient nur zur Information.",
       "dismiss": "Verwerfen",
-      "sectionNotices": "Hinweise"
+      "sectionNotices": "Hinweise",
+      "attempt": "Versuch {n}",
+      "locateInGraph": "Im Graph finden",
+      "openSession": "Sitzung öffnen"
     },
     "iteration": {
       "title": "Iterationssitzung",
@@ -3166,6 +3173,30 @@
       "interrupted": "Unterbrochen",
       "cancelled": "Abgebrochen"
     },
+    "iterationOutcome": {
+      "succeeded": "Erfolgreich",
+      "empty_diff": "Keine Änderungen",
+      "validation_failed": "Validierung fehlgeschlagen",
+      "declared_complete": "Als abgeschlossen gemeldet",
+      "no_artifacts": "Keine Artefakte",
+      "abandoned": "Abgebrochen"
+    },
+    "failureSig": {
+      "emptyDiff": "Der Agent hat keine Dateiänderungen erzeugt.",
+      "validationFailed": "Die Validierungsbefehle sind fehlgeschlagen.",
+      "noArtifacts": "Der Agent hat keine Artefakte erzeugt.",
+      "infraFailure": "Ein Infrastrukturfehler hat den Lauf unterbrochen.",
+      "stalled": "Die Iteration lief, ohne abzuschließen.",
+      "maxAttempts": "Nach den maximalen Versuchen gestoppt.",
+      "repeatedFailure": "Derselbe Fehler trat wiederholt auf.",
+      "validationUnrunnable": "Die Validierungsbefehle konnten nicht ausgeführt werden.",
+      "dependencyUnsatisfiable": "Eine Aufgabenabhängigkeit kann nie erfüllt werden.",
+      "worktreeUnavailable": "Der Arbeitsbaum war nicht verfügbar.",
+      "worktreeDirty": "Der Arbeitsbaum hatte vor dem Abschluss nicht committete Änderungen.",
+      "noIntegrationCriteria": "Es wurden keine Integrationskriterien definiert.",
+      "integrationGap": "Die Integrationsprüfung schlug wiederholt fehl.",
+      "designRejected": "Der Entwurf wurde zu oft abgelehnt."
+    },
     "memoryKind": {
       "constitution": "Verfassung",
       "constraint": "Einschränkung",
@@ -3196,6 +3227,10 @@
     "artifactList": {
       "empty": "Noch keine Artefakte.",
       "fromIteration": "Iter. #{id}"
+    },
+    "attention": {
+      "blocking": "{count} blockierend",
+      "notice": "{count} Hinweis"
     },
     "boardView": {
       "empty": "Noch keine Artefakte."
@@ -3269,7 +3304,8 @@
     },
     "dag": {
       "running": "Läuft",
-      "queued": "In Warteschlange"
+      "queued": "In Warteschlange",
+      "attention": "{count, plural, one {# Element braucht dich} other {# Elemente brauchen dich}}"
     },
     "stageRail": {
       "statusDone": "Fertig",

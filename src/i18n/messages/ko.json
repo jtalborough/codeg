@@ -3065,6 +3065,10 @@
       "noChanges": "변경 없음.",
       "linkedHeading": "연결된 이터레이션",
       "producedBy": "이터레이션 #{id}에서 생성됨",
+      "targetingHeading": "이 아티팩트의 반복",
+      "attentionHeading": "처리 필요",
+      "openSession": "세션 열기",
+      "attempt": "{n}번째 시도",
       "gateDesignPrompt": "이 설계는 승인을 기다리고 있습니다.",
       "gateMergePrompt": "이 결과는 병합할 준비가 되었습니다."
     },
@@ -3100,7 +3104,10 @@
       "kindReflectFailed": "메모리 회고 건너뜀",
       "reflectFailedDesc": "이 이슈의 메모리 통합이 여러 번 시도했지만 완료되지 않았습니다. 이슈는 병합되었으며 영향을 받지 않습니다. 이 알림은 정보 제공용입니다.",
       "dismiss": "닫기",
-      "sectionNotices": "알림"
+      "sectionNotices": "알림",
+      "attempt": "{n}번째 시도",
+      "locateInGraph": "그래프에서 찾기",
+      "openSession": "세션 열기"
     },
     "iteration": {
       "title": "이터레이션 세션",
@@ -3166,6 +3173,30 @@
       "interrupted": "중단됨",
       "cancelled": "취소됨"
     },
+    "iterationOutcome": {
+      "succeeded": "성공",
+      "empty_diff": "변경 없음",
+      "validation_failed": "검증 실패",
+      "declared_complete": "완료 선언",
+      "no_artifacts": "산출물 없음",
+      "abandoned": "중단됨"
+    },
+    "failureSig": {
+      "emptyDiff": "에이전트가 파일을 변경하지 않았습니다.",
+      "validationFailed": "검증 명령이 실패했습니다.",
+      "noArtifacts": "에이전트가 산출물을 생성하지 않았습니다.",
+      "infraFailure": "인프라 오류로 실행이 중단되었습니다.",
+      "stalled": "반복이 실행되었지만 완료되지 않았습니다.",
+      "maxAttempts": "최대 시도 횟수에 도달하여 중단되었습니다.",
+      "repeatedFailure": "같은 실패가 반복되었습니다.",
+      "validationUnrunnable": "검증 명령을 실행할 수 없었습니다.",
+      "dependencyUnsatisfiable": "작업 의존성을 충족할 수 없습니다.",
+      "worktreeUnavailable": "작업 트리를 사용할 수 없었습니다.",
+      "worktreeDirty": "완료 전 작업 트리에 커밋되지 않은 변경이 있었습니다.",
+      "noIntegrationCriteria": "통합 기준이 정의되지 않았습니다.",
+      "integrationGap": "통합 검증이 계속 실패했습니다.",
+      "designRejected": "설계가 너무 여러 번 거부되었습니다."
+    },
     "memoryKind": {
       "constitution": "헌장",
       "constraint": "제약",
@@ -3196,6 +3227,10 @@
     "artifactList": {
       "empty": "아직 산출물이 없습니다.",
       "fromIteration": "이터레이션 #{id}"
+    },
+    "attention": {
+      "blocking": "{count}건 차단",
+      "notice": "{count}건 알림"
     },
     "boardView": {
       "empty": "아직 산출물이 없습니다."
@@ -3269,7 +3304,8 @@
     },
     "dag": {
       "running": "실행 중",
-      "queued": "대기 중"
+      "queued": "대기 중",
+      "attention": "{count, plural, other {# 건 처리 필요}}"
     },
     "stageRail": {
       "statusDone": "완료",

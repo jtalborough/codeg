@@ -3065,6 +3065,10 @@
       "noChanges": "無變更。",
       "linkedHeading": "關聯疊代",
       "producedBy": "由疊代 #{id} 產出",
+      "targetingHeading": "針對此工件的迭代",
+      "attentionHeading": "需要處理",
+      "openSession": "開啟工作階段",
+      "attempt": "第 {n} 次嘗試",
       "gateDesignPrompt": "該設計正在等待你的核准。",
       "gateMergePrompt": "該成果已可合併。"
     },
@@ -3100,7 +3104,10 @@
       "kindReflectFailed": "記憶反思已略過",
       "reflectFailedDesc": "此議題的記憶整合在多次嘗試後仍未完成。議題已合併且不受影響；此通知僅供參考。",
       "dismiss": "忽略",
-      "sectionNotices": "通知"
+      "sectionNotices": "通知",
+      "attempt": "第 {n} 次嘗試",
+      "locateInGraph": "在圖中定位",
+      "openSession": "開啟工作階段"
     },
     "iteration": {
       "title": "疊代會話",
@@ -3166,6 +3173,30 @@
       "interrupted": "已中斷",
       "cancelled": "已取消"
     },
+    "iterationOutcome": {
+      "succeeded": "成功",
+      "empty_diff": "無變更",
+      "validation_failed": "驗證失敗",
+      "declared_complete": "宣告完成",
+      "no_artifacts": "無工件",
+      "abandoned": "已放棄"
+    },
+    "failureSig": {
+      "emptyDiff": "智能體沒有產生任何檔案變更。",
+      "validationFailed": "驗證命令執行失敗。",
+      "noArtifacts": "智能體沒有產出任何工件。",
+      "infraFailure": "基礎設施錯誤中斷了本次執行。",
+      "stalled": "迭代執行但未完成。",
+      "maxAttempts": "達到最大嘗試次數後停止。",
+      "repeatedFailure": "相同的失敗反覆出現。",
+      "validationUnrunnable": "無法執行驗證命令。",
+      "dependencyUnsatisfiable": "某個任務相依永遠無法滿足。",
+      "worktreeUnavailable": "工作樹不可用。",
+      "worktreeDirty": "完成前工作樹存在未提交的變更。",
+      "noIntegrationCriteria": "未定義整合準則。",
+      "integrationGap": "整合驗證持續失敗。",
+      "designRejected": "設計被拒絕次數過多。"
+    },
     "memoryKind": {
       "constitution": "章程",
       "constraint": "約束",
@@ -3196,6 +3227,10 @@
     "artifactList": {
       "empty": "暫無工件。",
       "fromIteration": "疊代 #{id}"
+    },
+    "attention": {
+      "blocking": "{count} 項阻塞",
+      "notice": "{count} 項提示"
     },
     "boardView": {
       "empty": "暫無工件。"
@@ -3269,7 +3304,8 @@
     },
     "dag": {
       "running": "執行中",
-      "queued": "排隊中"
+      "queued": "排隊中",
+      "attention": "{count, plural, other {# 項待處理}}"
     },
     "stageRail": {
       "statusDone": "已完成",
