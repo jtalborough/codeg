@@ -4,13 +4,16 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
 import { TriangleAlert } from "lucide-react"
 
+import { foldReviews, placeGhosts } from "@/lib/loop-dag"
 import {
-  buildDag,
-  foldReviews,
-  placeGhosts,
-  type DagCluster,
-  type PendingNode,
-} from "@/lib/loop-dag"
+  buildProcessGraph,
+  type ArtifactNode,
+  type Phase,
+  type PhaseConnector,
+  type PhasePending,
+  type PhaseState,
+  type ProcessGraph,
+} from "@/lib/loop-process-graph"
 import type { AttentionKey } from "@/lib/loop-attention"
 import type {
   LoopArtifactRow,
@@ -22,24 +25,37 @@ import type {
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-// Layout geometry (px). Read stages occupy fixed columns (x encodes the pipeline
-// stage); task clusters fold in their reviews and stack as parallel lanes, with a
-// depends_on chain running rightward across columns.
-const COL_W = 208
-const NODE_W = 176
-const HEADER_H = 58
-const ROW_PITCH = HEADER_H + 18
-const GHOST_GAP = ROW_PITCH - HEADER_H // gap between a column's last real node and its ghost
-const PAD = 8
-const LANE_GAP = 22
+// ---------------------------------------------------------------------------
+// Layout geometry (px). The macro layout is six phase containers laid out left
+// → right; Implement alone has rich internal structure (the `depends_on` task
+// forest, folded reviews, plan ghosts). Inter-phase lineage is folded to ONE
+// connector per phase pair, drawn between container boundaries. Hiding dead
+// nodes is a pure render-layer choice (the model is built once, toggle-free).
+// ---------------------------------------------------------------------------
+const PAD = 8 // canvas margin
+const COL_W = 208 // Implement-internal column pitch (a depends_on step)
+const NODE_W = 176 // a card's width
+const HEADER_H = 58 // a card header's height
+const ROW_PITCH = HEADER_H + 18 // stacked-member vertical pitch
+const GHOST_GAP = ROW_PITCH - HEADER_H // gap above a column's first ghost
+const LANE_GAP = 22 // gap between Implement lanes
 const REVIEW_H = 22
 const REVIEW_PAD = 6
-const REVIEW_DIVIDER = 1 // border-t between the task header and its reviews
+const REVIEW_DIVIDER = 1 // border-t between a task header and its reviews
+
+const PHASE_HEADER_H = 30 // a phase container's title bar
+const PHASE_PAD = 12 // a phase container's inner padding
+const PHASE_GAP = 72 // horizontal gap between phase containers (connector room)
+const PLACEHOLDER_W = 116 // an empty phase's slim placeholder box
+const PLACEHOLDER_H = 72
+const SKIP_LANE_GAP = 18 // gap below the boxes before the skip-routing lane
+const SKIP_LANE_H = 28 // reserved band a skip connector dips into
 
 /** Superseded / cancelled nodes are history; when revealed they render dimmed. */
 const isDead = (s: LoopArtifactStatus): boolean =>
   s === "superseded" || s === "cancelled"
 
+/** Per-artifact status → dot color (a node's own lifecycle). */
 const STATUS_DOT: Record<LoopArtifactStatus, string> = {
   pending: "bg-muted-foreground/40",
   in_progress: "bg-sky-500",
@@ -48,6 +64,25 @@ const STATUS_DOT: Record<LoopArtifactStatus, string> = {
   blocked: "bg-destructive",
   superseded: "bg-muted-foreground/30",
   cancelled: "bg-muted-foreground/30",
+}
+
+/** Per-phase rollup state → dot color. Distinct from {@link STATUS_DOT}: a phase
+ *  has `active` (any member in flight / a pending ghost) and `empty` states that
+ *  no single artifact status carries. */
+const PHASE_STATE_DOT: Record<PhaseState, string> = {
+  blocked: "bg-destructive",
+  awaiting_approval: "bg-amber-500",
+  active: "bg-sky-500",
+  pending: "bg-muted-foreground/40",
+  done: "bg-emerald-500",
+  empty: "bg-muted-foreground/20",
+}
+
+/** A task and the reviews to render under it, decoupled from the model so the
+ *  renderer no longer depends on the retired `DagCluster` shape. */
+interface TaskClusterView {
+  task: LoopArtifactRow
+  fold: { latest: LoopArtifactRow[]; olderCount: number }
 }
 
 /**
@@ -79,22 +114,350 @@ function AttentionMark() {
   )
 }
 
-/** Height of a cluster's folded reviews block (0 when the task has no reviews). */
+/** Height of a task's folded reviews block (0 when it has none). */
 function reviewsBlockHeight(reviews: LoopArtifactRow[]): number {
   const { latest, olderCount } = foldReviews(reviews)
   const rows = latest.length + (olderCount > 0 ? 1 : 0)
   return rows === 0 ? 0 : REVIEW_DIVIDER + REVIEW_PAD * 2 + rows * REVIEW_H
 }
 
-const clusterHeight = (c: DagCluster) =>
-  HEADER_H + reviewsBlockHeight(c.reviews)
+// --- geometry layout types -------------------------------------------------
+
+interface MemberLayout {
+  node: ArtifactNode
+  x: number
+  y: number
+  height: number
+  /** Folded reviews — only meaningful for Implement task members. */
+  fold: { latest: LoopArtifactRow[]; olderCount: number }
+}
+interface PendingLayout {
+  pending: PhasePending
+  x: number
+  y: number
+}
+interface PhaseBoxLayout {
+  phase: Phase
+  /** Solid box (has visible content) vs slim placeholder (empty phase). */
+  solid: boolean
+  x: number
+  y: number
+  width: number
+  height: number
+  members: MemberLayout[]
+  pending: PendingLayout[]
+}
+interface WorkflowEdgeLayout {
+  id: string
+  from: { x: number; y: number }
+  to: { x: number; y: number }
+}
+interface ConnectorLayout {
+  connector: PhaseConnector
+  path: string
+  dashed: boolean
+  badgeX: number
+  badgeY: number
+  /** Count shown on the badge: total when revealing dead, else active. */
+  visibleCount: number
+  /** Links folded out of view (dead endpoint) under the current toggle. */
+  hiddenCount: number
+}
+interface GraphGeom {
+  width: number
+  height: number
+  boxes: PhaseBoxLayout[]
+  workflowEdges: WorkflowEdgeLayout[]
+  connectors: ConnectorLayout[]
+}
+
+interface PreLayout {
+  phase: Phase
+  solid: boolean
+  contentW: number
+  contentH: number
+  memberLocal: Array<{
+    node: ArtifactNode
+    lx: number
+    ly: number
+    height: number
+    fold: { latest: LoopArtifactRow[]; olderCount: number }
+  }>
+  pendingLocal: Array<{ pending: PhasePending; lx: number; ly: number }>
+}
+
+/** Visible rows of a node's reviews under the current toggle (dead hidden by
+ *  default, revealed dimmed when the toggle is on). */
+function visibleReviewRows(
+  node: ArtifactNode,
+  showSuperseded: boolean
+): LoopArtifactRow[] {
+  const src = showSuperseded
+    ? node.reviews
+    : node.reviews.filter((r) => !r.dead)
+  return src.map((r) => r.artifact)
+}
 
 /**
- * Self-drawn DAG: an SVG layer renders provenance edges (derivation solid,
- * skips_to dashed, dependency subtle) behind absolutely-positioned HTML cards.
- * Read stages are fixed columns; each task is a *cluster* that folds in its own
- * reviews (latest attempt expanded, older attempts collapsed to a count), and
- * parallel task chains stack as lanes. Clicking any node opens its drawer.
+ * Phase-internal content metrics + local placements (origin at the content
+ * area's top-left). Implement lays its task forest out by col/lane (lanes
+ * compacted over the visible set so hiding a dead chain leaves no gap) plus
+ * plan ghosts beneath; other phases stack members then pending ghosts.
+ */
+function prelayoutPhase(phase: Phase, showSuperseded: boolean): PreLayout {
+  const visibleMembers = showSuperseded
+    ? phase.members
+    : phase.members.filter((m) => !m.dead)
+  const solid = visibleMembers.length > 0 || phase.pending.length > 0
+
+  if (phase.kind === "implement") {
+    // Compact the (possibly sparse after hiding dead) lanes to 0..n-1.
+    const lanesPresent = [...new Set(visibleMembers.map((m) => m.lane))].sort(
+      (a, b) => a - b
+    )
+    const laneIndex = new Map(lanesPresent.map((l, i) => [l, i]))
+    const laneHeight: number[] = new Array(lanesPresent.length).fill(0)
+    const memberLocal = visibleMembers.map((node) => {
+      const reviews = visibleReviewRows(node, showSuperseded)
+      const height = HEADER_H + reviewsBlockHeight(reviews)
+      const li = laneIndex.get(node.lane)!
+      laneHeight[li] = Math.max(laneHeight[li], height)
+      return { node, reviews, height, fold: foldReviews(reviews), li }
+    })
+    const laneY: number[] = []
+    let acc = 0
+    for (let i = 0; i < lanesPresent.length; i += 1) {
+      laneY[i] = acc
+      acc += laneHeight[i] + LANE_GAP
+    }
+    const laneBandBottom = lanesPresent.length ? acc - LANE_GAP : 0
+
+    const placedMembers = memberLocal.map((m) => ({
+      node: m.node,
+      lx: m.node.col * COL_W,
+      ly: laneY[m.li],
+      height: m.height,
+      fold: m.fold,
+    }))
+
+    // Plan ghosts stack beneath the first task column (mirrors the old layout),
+    // measured against that column's real-node bottom so they never overlap.
+    const columnBottom = new Map<number, number>()
+    for (const m of placedMembers) {
+      const prev = columnBottom.get(m.node.col) ?? 0
+      columnBottom.set(m.node.col, Math.max(prev, m.ly + m.height))
+    }
+    const ghostInputs = phase.pending.map((p, i) => ({
+      iterationId: p.iterationId,
+      col: 0,
+      row: i,
+    }))
+    const ghostY = placeGhosts(ghostInputs, columnBottom, {
+      pad: 0,
+      rowPitch: ROW_PITCH,
+      gap: GHOST_GAP,
+    })
+    const pendingLocal = phase.pending.map((p) => ({
+      pending: p,
+      lx: 0,
+      ly: ghostY.get(p.iterationId) ?? 0,
+    }))
+
+    const ghostBottom = pendingLocal.reduce(
+      (m, p) => Math.max(m, p.ly + HEADER_H),
+      0
+    )
+    const maxColRight = placedMembers.reduce(
+      (m, p) => Math.max(m, p.node.col * COL_W + NODE_W),
+      0
+    )
+    const contentW = Math.max(maxColRight, pendingLocal.length ? NODE_W : 0)
+    const contentH = Math.max(laneBandBottom, ghostBottom)
+    return {
+      phase,
+      solid,
+      contentW,
+      contentH,
+      memberLocal: placedMembers,
+      pendingLocal,
+    }
+  }
+
+  // issue / requirement / design / result / reflect: simple vertical stack.
+  const memberLocal = visibleMembers.map((node, i) => ({
+    node,
+    lx: 0,
+    ly: i * ROW_PITCH,
+    height: HEADER_H,
+    fold: foldReviews([]),
+  }))
+  const pendingLocal = phase.pending.map((p, i) => ({
+    pending: p,
+    lx: 0,
+    ly: (visibleMembers.length + i) * ROW_PITCH,
+  }))
+  const rows = visibleMembers.length + phase.pending.length
+  const contentH = rows > 0 ? (rows - 1) * ROW_PITCH + HEADER_H : 0
+  const contentW = rows > 0 ? NODE_W : 0
+  return { phase, solid, contentW, contentH, memberLocal, pendingLocal }
+}
+
+/** S-curve between two box edges that face each other (earlier right → later
+ *  left), so a lineage connector never cuts through a box body. */
+function phaseConnectorPath(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number }
+): string {
+  const x1 = a.x + a.width
+  const y1 = a.y + a.height / 2
+  const x2 = b.x
+  const y2 = b.y + b.height / 2
+  const mx = (x1 + x2) / 2
+  return `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`
+}
+
+/** A skip connector dips into a reserved lane BELOW the boxes and runs across
+ *  it, so it visibly routes around any phase(s) it skips rather than appearing
+ *  to hang off the box in between. */
+function skipConnectorPath(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number },
+  laneY: number
+): string {
+  const x1 = a.x + a.width
+  const y1 = a.y + a.height / 2
+  const x2 = b.x
+  const y2 = b.y + b.height / 2
+  const mx = (x1 + x2) / 2
+  return `M ${x1} ${y1} C ${x1 + 40} ${y1}, ${x1 + 40} ${laneY}, ${mx} ${laneY} C ${x2 - 40} ${laneY}, ${x2 - 40} ${y2}, ${x2} ${y2}`
+}
+
+/** The model's connector counts under the toggle: total when revealing dead,
+ *  else active. The connector renders iff this is > 0 (no zero-count lines). */
+const connectorVisibleCount = (c: PhaseConnector, showSuperseded: boolean) =>
+  showSuperseded ? c.totalCount : c.activeCount
+
+/**
+ * Lay the whole graph out for a given toggle. Pure: depends only on the model
+ * and `showSuperseded`. Boxes are top-aligned left → right; members/pending get
+ * absolute canvas coords; connectors get boundary paths + a midpoint badge.
+ */
+function layoutGraph(graph: ProcessGraph, showSuperseded: boolean): GraphGeom {
+  const y0 = PAD
+  const pre = graph.phases.map((p) => prelayoutPhase(p, showSuperseded))
+
+  // Box sizes + left → right x positions.
+  let x = PAD
+  const boxes: PhaseBoxLayout[] = pre.map((p) => {
+    const width = p.solid ? PHASE_PAD * 2 + p.contentW : PLACEHOLDER_W
+    const height = p.solid
+      ? PHASE_HEADER_H + PHASE_PAD * 2 + p.contentH
+      : PLACEHOLDER_H
+    const bx = x
+    x += width + PHASE_GAP
+    const contentLeft = bx + PHASE_PAD
+    const contentTop = y0 + PHASE_HEADER_H + PHASE_PAD
+    return {
+      phase: p.phase,
+      solid: p.solid,
+      x: bx,
+      y: y0,
+      width,
+      height,
+      members: p.memberLocal.map((m) => ({
+        node: m.node,
+        x: contentLeft + m.lx,
+        y: contentTop + m.ly,
+        height: m.height,
+        fold: m.fold,
+      })),
+      pending: p.pendingLocal.map((pl) => ({
+        pending: pl.pending,
+        x: contentLeft + pl.lx,
+        y: contentTop + pl.ly,
+      })),
+    }
+  })
+
+  const canvasRight = x - PHASE_GAP + PAD
+  const maxBoxH = boxes.reduce((m, b) => Math.max(m, b.height), 0)
+  const boxByKind = new Map(boxes.map((b) => [b.phase.kind, b]))
+
+  // Implement-internal workflow edges (depends_on), between visible task cards.
+  const implBox = boxByKind.get("implement")
+  const memberPos = new Map<number, { x: number; y: number }>()
+  if (implBox)
+    for (const m of implBox.members)
+      memberPos.set(m.node.artifact.id, { x: m.x, y: m.y })
+  const implPhase = graph.phases.find((p) => p.kind === "implement")
+  const workflowEdges: WorkflowEdgeLayout[] = []
+  if (implPhase) {
+    for (const e of implPhase.workflow) {
+      const from = memberPos.get(e.from)
+      const to = memberPos.get(e.to)
+      if (!from || !to) continue
+      workflowEdges.push({ id: `${e.from}-${e.to}`, from, to })
+    }
+  }
+
+  // Folded lineage connectors. A reserved lane below the boxes routes skips.
+  const hasSkip = graph.connectors.some(
+    (c) =>
+      c.connectorKind === "skip" && connectorVisibleCount(c, showSuperseded) > 0
+  )
+  const skipLaneY = y0 + maxBoxH + SKIP_LANE_GAP + SKIP_LANE_H / 2
+  const connectors: ConnectorLayout[] = []
+  let skipIdx = 0
+  for (const c of graph.connectors) {
+    const visibleCount = connectorVisibleCount(c, showSuperseded)
+    if (visibleCount <= 0) continue // no zero-count lines when dead are hidden
+    const a = boxByKind.get(c.earlier)
+    const b = boxByKind.get(c.later)
+    if (!a || !b) continue
+    const hiddenCount = c.totalCount - c.activeCount
+    if (c.connectorKind === "skip") {
+      const laneY = skipLaneY + skipIdx * 10
+      skipIdx += 1
+      connectors.push({
+        connector: c,
+        path: skipConnectorPath(a, b, laneY),
+        dashed: true,
+        badgeX: (a.x + a.width + b.x) / 2,
+        badgeY: laneY,
+        visibleCount,
+        hiddenCount,
+      })
+    } else {
+      connectors.push({
+        connector: c,
+        path: phaseConnectorPath(a, b),
+        dashed: false,
+        badgeX: (a.x + a.width + b.x) / 2,
+        badgeY: (a.y + a.height / 2 + (b.y + b.height / 2)) / 2,
+        visibleCount,
+        hiddenCount,
+      })
+    }
+  }
+
+  const canvasBottom =
+    (hasSkip ? skipLaneY + SKIP_LANE_H / 2 : y0 + maxBoxH) + PAD
+  return {
+    width: canvasRight,
+    height: canvasBottom,
+    boxes,
+    workflowEdges,
+    connectors,
+  }
+}
+
+/**
+ * Self-drawn process graph: six phase containers laid left → right, with
+ * Implement holding the `depends_on` task forest (folded reviews, plan ghosts)
+ * internally. The 1→N / N→1 lineage that once sprawled as an edge-soup is folded
+ * into one connector per phase pair, drawn between container boundaries with a
+ * focusable midpoint badge whose tooltip traces every underlying link. Clicking
+ * any node opens its drawer; clicking a ghost opens its live iteration session.
  */
 export function DagGraph({
   artifacts,
@@ -123,71 +486,77 @@ export function DagGraph({
   onFocusConsumed?: () => void
   onSelect: (artifactId: number) => void
   /** Open a ghost's live iteration session (when it has a conversation). */
-  onOpenIteration?: (pending: PendingNode) => void
+  onOpenIteration?: (pending: PhasePending) => void
 }) {
   const tKind = useTranslations("Loops.artifactKind")
   const tStatus = useTranslations("Loops.artifactStatus")
   const tVerdict = useTranslations("Loops.reviewVerdict")
   const tDetail = useTranslations("Loops.issueDetail")
   const tDag = useTranslations("Loops.dag")
+  const tPhase = useTranslations("Loops.phase")
+  const tPhaseState = useTranslations("Loops.phaseState")
+
+  // The model is toggle-independent: built once, includes dead nodes flagged.
+  const graph = useMemo(
+    () => buildProcessGraph({ artifacts, links, liveIterations }),
+    [artifacts, links, liveIterations]
+  )
 
   // Dead nodes (superseded / cancelled) are hidden by default so the graph shows
-  // the live plan; the toggle reveals them (dimmed) for audit.
+  // the live plan; the toggle reveals them (dimmed) for audit. This is a pure
+  // render-layer choice — the geometry recomputes, the model does not.
   const [showSuperseded, setShowSuperseded] = useState(false)
-  const layout = useMemo(
-    () =>
-      buildDag(artifacts, links, liveIterations, {
-        includeSuperseded: showSuperseded,
-      }),
-    [artifacts, links, liveIterations, showSuperseded]
+  const geom = useMemo(
+    () => layoutGraph(graph, showSuperseded),
+    [graph, showSuperseded]
+  )
+
+  // Connector tooltips resolve endpoint titles from the FULL artifact set
+  // (top-level members AND reviews folded into clusters), since a review is a
+  // first-class folded node that can be a lineage endpoint.
+  const labelById = useMemo(
+    () => new Map(artifacts.map((a) => [a.id, a])),
+    [artifacts]
   )
 
   // Locate-in-graph: when a `focus` request lands and its node is rendered,
   // scroll to it and pulse it for a moment, then consume the request. Re-runs on
-  // layout changes so a focus set before the data arrived still resolves; if the
-  // node never renders (e.g. a focus on a hidden superseded node), the request is
-  // left for a later layout — the drawer remains the reliable locator regardless.
+  // geometry changes so a focus set before the data arrived still resolves; if
+  // the node never renders (e.g. a focus on a hidden superseded node), the
+  // request is left for a later layout — the drawer remains the reliable locator.
   const rootRef = useRef<HTMLDivElement>(null)
   const [pulsingId, setPulsingId] = useState<number | null>(null)
   const pulseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // The graph has data once any node would render; only then is a missing focus
   // target genuinely absent (vs. still loading / mounting after the request).
   const layoutReady =
-    layout.stageNodes.length > 0 ||
-    layout.clusters.length > 0 ||
-    layout.result != null ||
-    layout.reflection != null ||
-    layout.pending.length > 0 ||
-    layout.supersededCount > 0
+    graph.phases.some((p) => p.members.length > 0 || p.pending.length > 0) ||
+    graph.supersededCount > 0
   useEffect(() => {
     if (focus == null) return
     const el = rootRef.current?.querySelector<HTMLElement>(
       `[data-artifact-id="${focus}"]`
     )
     if (!el) {
-      // Node not in the current layout. If the graph has data, the target is
-      // genuinely absent (superseded/hidden/gone) → consume so a stale focus can
-      // never pulse an unrelated node later. If the graph is still empty (data
-      // loading, or it mounted after the request) keep focus for replay.
       if (layoutReady) onFocusConsumed?.()
       return
     }
     el.scrollIntoView({ block: "center", inline: "center" })
     // Reacting to an external locate request (URL nav) by scrolling the DOM and
-    // flashing a transient pulse — a legitimate effect→setState, like the
-    // sidebar's localStorage hydrate.
+    // flashing a transient pulse — a legitimate effect→setState.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPulsingId(focus)
     if (pulseTimer.current) clearTimeout(pulseTimer.current)
     pulseTimer.current = setTimeout(() => setPulsingId(null), 1600)
     onFocusConsumed?.()
-  }, [focus, layout, layoutReady, onFocusConsumed])
+  }, [focus, geom, layoutReady, onFocusConsumed])
   useEffect(
     () => () => {
       if (pulseTimer.current) clearTimeout(pulseTimer.current)
     },
     []
   )
+
   // Per-node attention count. The issue root additionally surfaces issue-level
   // cards (budget / dependency / coverage / triage / reflect) that
   // `buildAttentionMap` roots at "issue-root"; without this they'd be grouped but
@@ -196,288 +565,279 @@ export function DagGraph({
     (attentionMap?.get(`artifact:${a.id}`)?.length ?? 0) +
     (a.kind === "issue" ? (attentionMap?.get("issue-root")?.length ?? 0) : 0)
 
-  const geom = useMemo(() => {
-    const stageLayout = layout.stageNodes.map((node) => ({
-      node,
-      x: PAD + node.col * COL_W,
-      y: PAD + node.row * ROW_PITCH,
-    }))
-
-    // Lane bands: each lane is as tall as its tallest cluster; lanes stack with a
-    // fixed gap so variable-height clusters never overlap the lane below.
-    const laneHeight: number[] = Array(layout.laneCount).fill(0)
-    for (const c of layout.clusters) {
-      laneHeight[c.lane] = Math.max(laneHeight[c.lane], clusterHeight(c))
-    }
-    const laneY: number[] = []
-    let acc = PAD
-    for (let i = 0; i < layout.laneCount; i += 1) {
-      laneY[i] = acc
-      acc += laneHeight[i] + LANE_GAP
-    }
-    const clusterBandHeight = layout.laneCount ? acc - LANE_GAP - PAD : 0
-
-    const clusterLayout = layout.clusters.map((cluster) => ({
-      cluster,
-      x: PAD + cluster.col * COL_W,
-      y: laneY[cluster.lane],
-      height: clusterHeight(cluster),
-      fold: foldReviews(cluster.reviews),
-    }))
-
-    const stageBandHeight = layout.stageRowCount
-      ? (layout.stageRowCount - 1) * ROW_PITCH + HEADER_H
-      : 0
-    const resultY = PAD + Math.max(0, (clusterBandHeight - HEADER_H) / 2)
-    const resultLayout = layout.result
-      ? {
-          artifact: layout.result.artifact,
-          col: layout.result.col,
-          x: PAD + layout.result.col * COL_W,
-          y: resultY,
-        }
-      : null
-
-    // The post-merge reflection node sits one column past `result`, vertically
-    // centered the same way (mirrors the result node render).
-    const reflectionLayout = layout.reflection
-      ? {
-          artifact: layout.reflection.artifact,
-          col: layout.reflection.col,
-          x: PAD + layout.reflection.col * COL_W,
-          y: resultY,
-        }
-      : null
-
-    // Edge endpoints connect to each artifact's header rect (top of a cluster).
-    const boxOf = new Map<number, { x: number; y: number }>()
-    for (const s of stageLayout)
-      boxOf.set(s.node.artifact.id, { x: s.x, y: s.y })
-    for (const c of clusterLayout) {
-      boxOf.set(c.cluster.task.id, { x: c.x, y: c.y })
-    }
-    if (resultLayout) {
-      boxOf.set(resultLayout.artifact.id, {
-        x: resultLayout.x,
-        y: resultLayout.y,
-      })
-    }
-    // Register the reflection node so its derives_from→result edge resolves both
-    // endpoints (otherwise the edge would render detached or be dropped).
-    if (reflectionLayout) {
-      boxOf.set(reflectionLayout.artifact.id, {
-        x: reflectionLayout.x,
-        y: reflectionLayout.y,
-      })
-    }
-
-    // Ghost nodes for in-flight read/finalize/reflect stages (no output artifact
-    // yet). They carry no edges (their output node doesn't exist), so they're not
-    // registered in `boxOf`. Stack each strictly BELOW its column's real-node
-    // bottom: real nodes use three y-systems (stage rows, packed lane bands,
-    // centered result/reflection), so we measure each column's actual pixel
-    // bottom here — the only layer that can — and let `placeGhosts` position
-    // beneath it. A column with no real node leaves no entry → ghost sits at PAD.
-    const columnBottom = new Map<number, number>()
-    const noteBottom = (col: number, bottom: number) =>
-      columnBottom.set(col, Math.max(columnBottom.get(col) ?? 0, bottom))
-    for (const s of stageLayout) noteBottom(s.node.col, s.y + HEADER_H)
-    for (const c of clusterLayout) noteBottom(c.cluster.col, c.y + c.height)
-    if (resultLayout) noteBottom(resultLayout.col, resultLayout.y + HEADER_H)
-    if (reflectionLayout)
-      noteBottom(reflectionLayout.col, reflectionLayout.y + HEADER_H)
-    const ghostY = placeGhosts(layout.pending, columnBottom, {
-      pad: PAD,
-      rowPitch: ROW_PITCH,
-      gap: GHOST_GAP,
-    })
-    const pendingLayout = layout.pending.map((p) => ({
-      pending: p,
-      x: PAD + p.col * COL_W,
-      y: ghostY.get(p.iterationId) ?? PAD,
-    }))
-
-    const pendingBottom = pendingLayout.reduce(
-      (m, p) => Math.max(m, p.y - PAD + HEADER_H),
-      0
-    )
-    const contentHeight = Math.max(
-      stageBandHeight,
-      clusterBandHeight,
-      resultLayout || reflectionLayout ? HEADER_H : 0,
-      pendingBottom
-    )
-    return {
-      stageLayout,
-      clusterLayout,
-      resultLayout,
-      reflectionLayout,
-      pendingLayout,
-      boxOf,
-      width: PAD * 2 + Math.max(layout.colCount - 1, 0) * COL_W + NODE_W,
-      height: PAD * 2 + contentHeight,
-    }
-  }, [layout])
-
-  const canvasEmpty =
-    geom.stageLayout.length === 0 &&
-    geom.clusterLayout.length === 0 &&
-    !geom.resultLayout &&
-    !geom.reflectionLayout &&
-    geom.pendingLayout.length === 0
-  if (canvasEmpty && layout.supersededCount === 0) {
+  const unmappedCount = graph.unmappedArtifacts + graph.unmappedIterations
+  const hasAnyMember = graph.phases.some((p) => p.members.length > 0)
+  const hasAnyPending = graph.phases.some((p) => p.pending.length > 0)
+  if (!hasAnyMember && !hasAnyPending && graph.supersededCount === 0) {
     return null
   }
 
   return (
     <div ref={rootRef} className="flex flex-col gap-2">
-      {layout.supersededCount > 0 && (
-        <button
-          type="button"
-          onClick={() => setShowSuperseded((v) => !v)}
-          aria-pressed={showSuperseded}
-          className="self-start rounded-md border px-2 py-1 text-xs text-muted-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {showSuperseded
-            ? tDetail("hideSuperseded")
-            : tDetail("showSuperseded", { count: layout.supersededCount })}
-        </button>
-      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {graph.supersededCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowSuperseded((v) => !v)}
+            aria-pressed={showSuperseded}
+            className="rounded-md border px-2 py-1 text-xs text-muted-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {showSuperseded
+              ? tDetail("hideSuperseded")
+              : tDetail("showSuperseded", { count: graph.supersededCount })}
+          </button>
+        )}
+        {unmappedCount > 0 && (
+          <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 px-2 py-1 text-xs text-muted-foreground">
+            <AttentionMark />
+            {tDag("unmappedNodes", { count: unmappedCount })}
+          </span>
+        )}
+      </div>
+
       <div
         className="relative"
         style={{ width: geom.width, height: geom.height }}
       >
+        {/* Phase containers (background). */}
+        {geom.boxes.map((box) => (
+          <PhaseContainer
+            key={box.phase.kind}
+            box={box}
+            name={tPhase(box.phase.kind)}
+            stateLabel={tPhaseState(box.phase.state)}
+          />
+        ))}
+
+        {/* Decorative edges: folded-lineage connectors + Implement-internal
+            depends_on workflow. The interactive/labeled element is the badge. */}
         <svg
           className="pointer-events-none absolute inset-0 text-muted-foreground"
           width={geom.width}
           height={geom.height}
           aria-hidden
         >
-          {layout.edges.map((e) => {
-            const a = geom.boxOf.get(e.from)
-            const b = geom.boxOf.get(e.to)
-            if (!a || !b) return null
-            return (
-              <path
-                key={e.id}
-                d={edgePath(a, b)}
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={1.5}
-                strokeDasharray={e.dashed ? "4 4" : undefined}
-                className={
-                  e.dashed
-                    ? "opacity-50"
-                    : e.kind === "depends_on"
-                      ? "opacity-40"
-                      : "opacity-25"
-                }
-              />
-            )
-          })}
+          {geom.connectors.map((c) => (
+            <path
+              key={`conn:${c.connector.earlier}-${c.connector.later}-${c.connector.connectorKind}`}
+              d={c.path}
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+              strokeDasharray={c.dashed ? "5 4" : undefined}
+              className={c.dashed ? "opacity-50" : "opacity-30"}
+            />
+          ))}
+          {geom.workflowEdges.map((e) => (
+            <path
+              key={`wf:${e.id}`}
+              d={edgePath(e.from, e.to)}
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+              className="opacity-40"
+            />
+          ))}
         </svg>
 
-        {geom.stageLayout.map(({ node, x, y }) => (
-          <NodeCard
-            key={node.artifact.id}
-            artifact={node.artifact}
-            x={x}
-            y={y}
-            executing={executingIds.has(`artifact:${node.artifact.id}`)}
-            dimmed={isDead(node.artifact.status)}
-            attentionCount={nodeAttentionCount(node.artifact)}
-            pulsing={pulsingId === node.artifact.id}
-            kindLabel={tKind(node.artifact.kind)}
-            statusLabel={tStatus(node.artifact.status)}
-            executingLabel={tDetail("executingNow")}
-            attentionLabelOf={(count) => tDag("attention", { count })}
-            onSelect={onSelect}
+        {/* Connector badges — the focusable, labeled hit target per connector. */}
+        {geom.connectors.map((c) => (
+          <ConnectorBadge
+            key={`badge:${c.connector.earlier}-${c.connector.later}-${c.connector.connectorKind}`}
+            layout={c}
+            label={connectorAriaLabel(c, showSuperseded, {
+              earlier: tPhase(c.connector.earlier),
+              later: tPhase(c.connector.later),
+              summary: tDag("connector", { count: c.visibleCount }),
+              hidden: tDag("connectorHidden", { count: c.hiddenCount }),
+            })}
+            tooltip={connectorTooltip(c, labelById, {
+              earlier: tPhase(c.connector.earlier),
+              later: tPhase(c.connector.later),
+            })}
           />
         ))}
 
-        {geom.resultLayout && (
-          <NodeCard
-            artifact={geom.resultLayout.artifact}
-            x={geom.resultLayout.x}
-            y={geom.resultLayout.y}
-            executing={executingIds.has(
-              `artifact:${geom.resultLayout.artifact.id}`
-            )}
-            dimmed={isDead(geom.resultLayout.artifact.status)}
-            attentionCount={nodeAttentionCount(geom.resultLayout.artifact)}
-            pulsing={pulsingId === geom.resultLayout.artifact.id}
-            kindLabel={tKind(geom.resultLayout.artifact.kind)}
-            statusLabel={tStatus(geom.resultLayout.artifact.status)}
-            executingLabel={tDetail("executingNow")}
-            attentionLabelOf={(count) => tDag("attention", { count })}
-            onSelect={onSelect}
-          />
+        {/* Member + pending cards (foreground). */}
+        {geom.boxes.flatMap((box) =>
+          box.members.map((m) =>
+            box.phase.kind === "implement" ? (
+              <ClusterCard
+                key={m.node.artifact.id}
+                cluster={{ task: m.node.artifact, fold: m.fold }}
+                x={m.x}
+                y={m.y}
+                height={m.height}
+                dimmed={m.node.dead}
+                executingIds={executingIds}
+                pulsingId={pulsingId}
+                attentionCountOf={nodeAttentionCount}
+                kindLabel={tKind(m.node.artifact.kind)}
+                reviewKindLabel={tKind("review")}
+                statusLabelOf={(s) => tStatus(s)}
+                verdictLabelOf={(v) => tVerdict(v)}
+                executingLabel={tDetail("executingNow")}
+                attentionLabelOf={(count) => tDag("attention", { count })}
+                olderLabelOf={(count) => tDetail("reviewsOlder", { count })}
+                onSelect={onSelect}
+              />
+            ) : (
+              <NodeCard
+                key={m.node.artifact.id}
+                artifact={m.node.artifact}
+                x={m.x}
+                y={m.y}
+                executing={executingIds.has(`artifact:${m.node.artifact.id}`)}
+                dimmed={m.node.dead}
+                attentionCount={nodeAttentionCount(m.node.artifact)}
+                pulsing={pulsingId === m.node.artifact.id}
+                kindLabel={tKind(m.node.artifact.kind)}
+                statusLabel={tStatus(m.node.artifact.status)}
+                executingLabel={tDetail("executingNow")}
+                attentionLabelOf={(count) => tDag("attention", { count })}
+                onSelect={onSelect}
+              />
+            )
+          )
         )}
-
-        {geom.reflectionLayout && (
-          <NodeCard
-            artifact={geom.reflectionLayout.artifact}
-            x={geom.reflectionLayout.x}
-            y={geom.reflectionLayout.y}
-            executing={executingIds.has(
-              `artifact:${geom.reflectionLayout.artifact.id}`
-            )}
-            dimmed={isDead(geom.reflectionLayout.artifact.status)}
-            attentionCount={nodeAttentionCount(geom.reflectionLayout.artifact)}
-            pulsing={pulsingId === geom.reflectionLayout.artifact.id}
-            kindLabel={tKind(geom.reflectionLayout.artifact.kind)}
-            statusLabel={tStatus(geom.reflectionLayout.artifact.status)}
-            executingLabel={tDetail("executingNow")}
-            attentionLabelOf={(count) => tDag("attention", { count })}
-            onSelect={onSelect}
-          />
+        {geom.boxes.flatMap((box) =>
+          box.pending.map((p) => (
+            <PendingCard
+              key={`pending:${p.pending.iterationId}`}
+              pending={p.pending}
+              x={p.x}
+              y={p.y}
+              kindLabel={tKind(p.pending.kind)}
+              statusLabel={
+                p.pending.status === "running"
+                  ? tDag("running")
+                  : tDag("queued")
+              }
+              onOpen={onOpenIteration}
+            />
+          ))
         )}
-
-        {geom.clusterLayout.map(({ cluster, x, y, height, fold }) => (
-          <ClusterCard
-            key={cluster.task.id}
-            cluster={cluster}
-            fold={fold}
-            x={x}
-            y={y}
-            height={height}
-            dimmed={isDead(cluster.task.status)}
-            executingIds={executingIds}
-            attentionCount={nodeAttentionCount(cluster.task)}
-            pulsing={pulsingId === cluster.task.id}
-            kindLabel={tKind(cluster.task.kind)}
-            reviewKindLabel={tKind("review")}
-            statusLabelOf={(s) => tStatus(s)}
-            verdictLabelOf={(v) => tVerdict(v)}
-            executingLabel={tDetail("executingNow")}
-            attentionLabelOf={(count) => tDag("attention", { count })}
-            olderLabelOf={(count) => tDetail("reviewsOlder", { count })}
-            onSelect={onSelect}
-          />
-        ))}
-
-        {geom.pendingLayout.map(({ pending, x, y }) => (
-          <PendingCard
-            key={`pending:${pending.iterationId}`}
-            pending={pending}
-            x={x}
-            y={y}
-            kindLabel={tKind(pending.kind)}
-            statusLabel={
-              pending.status === "running" ? tDag("running") : tDag("queued")
-            }
-            onOpen={onOpenIteration}
-          />
-        ))}
       </div>
     </div>
   )
 }
 
+/** Accessible label for a connector: phase pair + visible link count, plus the
+ *  hidden count when the toggle is hiding dead-endpoint links. */
+function connectorAriaLabel(
+  c: ConnectorLayout,
+  showSuperseded: boolean,
+  t: { earlier: string; later: string; summary: string; hidden: string }
+): string {
+  const head = `${t.earlier} → ${t.later}, ${t.summary}`
+  return !showSuperseded && c.hiddenCount > 0 ? `${head}, ${t.hidden}` : head
+}
+
+/** Plain-text tooltip tracing every folded link in its canonical direction. */
+function connectorTooltip(
+  c: ConnectorLayout,
+  labelById: Map<number, LoopArtifactRow>,
+  t: { earlier: string; later: string }
+): string {
+  const lines = [`${t.earlier} → ${t.later}`]
+  for (const link of c.connector.sourceLinks) {
+    const from = labelById.get(link.fromArtifactId)
+    const to = labelById.get(link.toArtifactId)
+    const fromLabel = from ? from.title : `#${link.fromArtifactId}`
+    const toLabel = to ? to.title : `#${link.toArtifactId}`
+    lines.push(`${fromLabel} → ${toLabel}`)
+  }
+  return lines.join("\n")
+}
+
+/** A phase's bordered container: a title bar (state dot + name) over the region
+ *  its member/pending cards overlay. Empty phases render a slim placeholder. */
+function PhaseContainer({
+  box,
+  name,
+  stateLabel,
+}: {
+  box: PhaseBoxLayout
+  name: string
+  stateLabel: string
+}) {
+  return (
+    <div
+      data-phase={box.phase.kind}
+      data-phase-state={box.phase.state}
+      data-placeholder={box.solid ? undefined : "true"}
+      style={{ left: box.x, top: box.y, width: box.width, height: box.height }}
+      className={cn(
+        "absolute rounded-xl border",
+        box.solid ? "bg-muted/20" : "border-dashed bg-muted/5"
+      )}
+    >
+      <div
+        className="flex items-center gap-1.5 px-3"
+        style={{ height: PHASE_HEADER_H }}
+      >
+        <span
+          title={stateLabel}
+          className={cn(
+            "h-2 w-2 shrink-0 rounded-full",
+            PHASE_STATE_DOT[box.phase.state]
+          )}
+        />
+        <span
+          className={cn(
+            "truncate text-[0.625rem] font-medium uppercase tracking-wide",
+            box.solid ? "text-muted-foreground" : "text-muted-foreground/60"
+          )}
+        >
+          {name}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+/** The focusable, labeled hit target for a folded connector — its midpoint
+ *  badge. The line itself is decorative; this carries count + a11y + tooltip. */
+function ConnectorBadge({
+  layout,
+  label,
+  tooltip,
+}: {
+  layout: ConnectorLayout
+  label: string
+  tooltip: string
+}) {
+  const c = layout.connector
+  return (
+    <span
+      role="img"
+      tabIndex={0}
+      aria-label={label}
+      title={tooltip}
+      data-connector={`${c.earlier}->${c.later}:${c.connectorKind}`}
+      data-skip={c.connectorKind === "skip" ? "true" : undefined}
+      data-total={c.totalCount}
+      data-active={c.activeCount}
+      data-hidden={layout.hiddenCount}
+      style={{
+        left: layout.badgeX,
+        top: layout.badgeY,
+        transform: "translate(-50%, -50%)",
+      }}
+      className={cn(
+        "absolute inline-flex min-w-[1.25rem] items-center justify-center rounded-full border bg-background px-1.5 text-[0.625rem] font-medium tabular-nums text-muted-foreground shadow-sm outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring",
+        layout.dashed && "border-dashed"
+      )}
+    >
+      {layout.visibleCount}
+    </span>
+  )
+}
+
 /**
- * Ghost card for an in-flight read/finalize/reflect stage whose output artifact
- * doesn't exist yet (spec D2). Dashed + pulsing; clickable to its live iteration
- * session when one is attached.
+ * Ghost card for an in-flight stage whose output artifact doesn't exist yet
+ * (spec D2). Dashed + pulsing; clickable to its live iteration session when one
+ * is attached. Derives its label from the pending kind + status only (no title).
  */
 function PendingCard({
   pending,
@@ -487,12 +847,12 @@ function PendingCard({
   statusLabel,
   onOpen,
 }: {
-  pending: PendingNode
+  pending: PhasePending
   x: number
   y: number
   kindLabel: string
   statusLabel: string
-  onOpen?: (pending: PendingNode) => void
+  onOpen?: (pending: PhasePending) => void
 }) {
   const clickable = pending.conversationId != null && onOpen != null
   return (
@@ -540,7 +900,7 @@ function StatusDot({
   )
 }
 
-/** A read-stage (issue/requirement/design) or result node. */
+/** A read-stage (issue/requirement/design), result, or reflection node. */
 function NodeCard({
   artifact,
   x,
@@ -607,17 +967,18 @@ function NodeCard({
   )
 }
 
-/** A task and its reviews, rendered as one bordered cluster. */
+/** A task and its reviews, rendered as one bordered cluster. Each review is a
+ *  first-class node: it carries its own `data-artifact-id`, locate pulse, and
+ *  attention ring so it participates in locate / attention / drawer like a task. */
 function ClusterCard({
   cluster,
-  fold,
   x,
   y,
   height,
   dimmed,
   executingIds,
-  attentionCount,
-  pulsing,
+  pulsingId,
+  attentionCountOf,
   kindLabel,
   reviewKindLabel,
   statusLabelOf,
@@ -627,15 +988,14 @@ function ClusterCard({
   olderLabelOf,
   onSelect,
 }: {
-  cluster: DagCluster
-  fold: { latest: LoopArtifactRow[]; olderCount: number }
+  cluster: TaskClusterView
   x: number
   y: number
   height: number
   dimmed: boolean
   executingIds: Set<string>
-  attentionCount: number
-  pulsing: boolean
+  pulsingId: number | null
+  attentionCountOf: (artifact: LoopArtifactRow) => number
   kindLabel: string
   reviewKindLabel: string
   statusLabelOf: (s: LoopArtifactStatus) => string
@@ -645,18 +1005,25 @@ function ClusterCard({
   olderLabelOf: (count: number) => string
   onSelect: (artifactId: number) => void
 }) {
-  const { task } = cluster
+  const { task, fold } = cluster
   const taskExecuting = executingIds.has(`artifact:${task.id}`)
   const hasReviews = fold.latest.length > 0 || fold.olderCount > 0
-  const attention = attentionCount > 0
-  const attentionLabel = attention ? attentionLabelOf(attentionCount) : null
+  const taskAttentionCount = attentionCountOf(task)
+  const taskAttention = taskAttentionCount > 0
+  const taskAttentionLabel = taskAttention
+    ? attentionLabelOf(taskAttentionCount)
+    : null
   return (
     <div
       data-artifact-id={task.id}
       style={{ left: x, top: y, width: NODE_W, height }}
       className={cn(
         "absolute flex flex-col overflow-hidden rounded-lg border bg-card shadow-sm",
-        nodeRingClass({ pulsing, attention, executing: false }),
+        nodeRingClass({
+          pulsing: pulsingId === task.id,
+          attention: taskAttention,
+          executing: false,
+        }),
         dimmed && "opacity-50"
       )}
     >
@@ -665,8 +1032,8 @@ function ClusterCard({
         onClick={() => onSelect(task.id)}
         style={{ height: HEADER_H }}
         aria-label={
-          attentionLabel
-            ? `${kindLabel}: ${task.title} — ${attentionLabel}`
+          taskAttentionLabel
+            ? `${kindLabel}: ${task.title} — ${taskAttentionLabel}`
             : `${kindLabel}: ${task.title}`
         }
         className={cn(
@@ -683,8 +1050,8 @@ function ClusterCard({
           <span className="text-[0.625rem] uppercase tracking-wide text-muted-foreground">
             {kindLabel}
           </span>
-          {attention && (
-            <span className="ml-auto" title={attentionLabel ?? undefined}>
+          {taskAttention && (
+            <span className="ml-auto" title={taskAttentionLabel ?? undefined}>
               <AttentionMark />
             </span>
           )}
@@ -699,29 +1066,46 @@ function ClusterCard({
         >
           {fold.latest.map((review) => {
             const executing = executingIds.has(`artifact:${review.id}`)
+            const reviewAttentionCount = attentionCountOf(review)
+            const reviewAttention = reviewAttentionCount > 0
             // Row text keeps the artifact title so sibling reviews stay distinct;
             // the pass/fail outcome shows as a shape glyph (✓/✗) — not color alone
             // — and is named in the accessible label + tooltip.
             const verdictLabel = review.verdict
               ? verdictLabelOf(review.verdict)
               : null
+            const attentionLabel = reviewAttention
+              ? attentionLabelOf(reviewAttentionCount)
+              : null
             const statusLabel = executing
               ? executingLabel
               : statusLabelOf(review.status)
+            const baseLabel = verdictLabel
+              ? `${reviewKindLabel}: ${review.title} — ${verdictLabel}`
+              : `${reviewKindLabel}: ${review.title}`
             return (
               <button
                 key={review.id}
                 type="button"
+                data-artifact-id={review.id}
                 onClick={() => onSelect(review.id)}
                 style={{ height: REVIEW_H }}
                 aria-label={
-                  verdictLabel
-                    ? `${reviewKindLabel}: ${review.title} — ${verdictLabel}`
-                    : `${reviewKindLabel}: ${review.title}`
+                  attentionLabel
+                    ? `${baseLabel} — ${attentionLabel}`
+                    : baseLabel
                 }
                 title={verdictLabel ?? statusLabel}
                 className={cn(
                   "flex items-center gap-1.5 px-3 text-left outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                  nodeRingClass(
+                    {
+                      pulsing: pulsingId === review.id,
+                      attention: reviewAttention,
+                      executing: false,
+                    },
+                    true
+                  ),
                   // A dead review folded under a live task is dimmed on its own;
                   // when the task itself is dead the whole cluster is already dimmed.
                   isDead(review.status) && "opacity-50"
@@ -738,6 +1122,11 @@ function ClusterCard({
                 <span className="flex-1 truncate text-xs text-muted-foreground">
                   {review.title}
                 </span>
+                {reviewAttention && (
+                  <span title={attentionLabel ?? undefined}>
+                    <AttentionMark />
+                  </span>
+                )}
                 {review.verdict && (
                   <span
                     aria-hidden
@@ -770,8 +1159,8 @@ function ClusterCard({
 
 /**
  * Horizontal S-curve connecting two header rects on the sides that face each
- * other, so an edge never cuts through a node body. Edges run from a dependent
- * (right) back to its source (left).
+ * other, so an edge never cuts through a node body. Used for Implement-internal
+ * depends_on edges (which run between equal-size task cards).
  */
 function edgePath(
   a: { x: number; y: number },

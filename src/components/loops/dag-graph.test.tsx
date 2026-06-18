@@ -1,11 +1,20 @@
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { DagGraph } from "./dag-graph"
 import type { AttentionKey } from "@/lib/loop-attention"
-import type { LoopArtifactRow, LoopInboxItemRow } from "@/lib/types"
+import type {
+  LoopArtifactRow,
+  LoopInboxItemRow,
+  LoopIterationRow,
+  LoopLinkKind,
+  LoopLinkRow,
+  LoopStage,
+} from "@/lib/types"
 
-// Echoing translator across every namespace the graph uses.
+// Echoing translator across every namespace the graph uses. Counts therefore
+// can't be read from translated text (the mock drops ICU params) — connector
+// counts are asserted via the structured data-total/active/hidden attributes.
 vi.mock("next-intl", () => ({ useTranslations: () => (k: string) => k }))
 
 function art(
@@ -23,6 +32,46 @@ function art(
     attempt: 0,
     sort: 0,
     updated_at: "2026-06-17T00:00:00Z",
+    ...over,
+  }
+}
+
+function link(
+  id: number,
+  from: number,
+  to: number,
+  kind: LoopLinkKind
+): LoopLinkRow {
+  return {
+    id,
+    from_artifact_id: from,
+    to_artifact_id: to,
+    kind,
+    source_revision_id: null,
+  }
+}
+
+function iter(
+  id: number,
+  stage: LoopStage,
+  over: Partial<LoopIterationRow> = {}
+): LoopIterationRow {
+  return {
+    id,
+    issue_id: 1,
+    issue_seq: id,
+    stage,
+    target_artifact_id: null,
+    target_title: null,
+    conversation_id: null,
+    status: "running",
+    launched_by: "engine",
+    attempt: 0,
+    tokens_used: 0,
+    outcome: null,
+    created_at: "2026-06-17T00:00:00Z",
+    started_at: "2026-06-17T00:00:00Z",
+    ended_at: null,
     ...over,
   }
 }
@@ -117,5 +166,237 @@ describe("DagGraph issue-level attention (Codex r2)", () => {
     expect(
       screen.queryByLabelText("issue: Root — attention")
     ).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P2: six-phase containers + folded connectors (the de-spaghetti render).
+// ---------------------------------------------------------------------------
+
+describe("DagGraph phase containers", () => {
+  it("renders all six phase containers, with unreached phases as placeholders", () => {
+    const { container } = render(
+      <DagGraph
+        {...base}
+        artifacts={[art({ id: 1, kind: "issue", title: "Root" })]}
+      />
+    )
+    const phases = [...container.querySelectorAll("[data-phase]")].map((el) =>
+      el.getAttribute("data-phase")
+    )
+    expect(new Set(phases)).toEqual(
+      new Set([
+        "issue",
+        "requirement",
+        "design",
+        "implement",
+        "result",
+        "reflect",
+      ])
+    )
+    // Issue has a member → solid; the rest are empty → slim placeholders.
+    expect(container.querySelector('[data-phase="issue"]')).not.toHaveAttribute(
+      "data-placeholder"
+    )
+    expect(container.querySelector('[data-phase="design"]')).toHaveAttribute(
+      "data-placeholder",
+      "true"
+    )
+    expect(container.querySelector('[data-phase="result"]')).toHaveAttribute(
+      "data-placeholder",
+      "true"
+    )
+  })
+})
+
+// Golden fixture = issue #1: 1 issue + 12 requirements + 1 design + 10 tasks +
+// 1 review, with the 34 lineage edges that must fold into 3 connectors.
+function issueOneFixture(): {
+  artifacts: LoopArtifactRow[]
+  links: LoopLinkRow[]
+} {
+  const ISSUE = 1
+  const REQ_IDS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+  const DESIGN = 14
+  const TASK_IDS = [15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+  const REVIEW = 25
+  const artifacts: LoopArtifactRow[] = [
+    art({ id: ISSUE, kind: "issue", status: "done" }),
+    ...REQ_IDS.map((id) => art({ id, kind: "requirement", status: "done" })),
+    art({ id: DESIGN, kind: "design", status: "done" }),
+    ...TASK_IDS.map((id, i) =>
+      art({
+        id,
+        kind: "task",
+        status: i === 0 ? "in_progress" : "done",
+        sort: id,
+      })
+    ),
+    art({ id: REVIEW, kind: "review", status: "done", verdict: "pass" }),
+  ]
+  let linkId = 0
+  const links: LoopLinkRow[] = []
+  for (const r of REQ_IDS) links.push(link(++linkId, r, ISSUE, "derives_from"))
+  for (const r of REQ_IDS) links.push(link(++linkId, DESIGN, r, "derives_from"))
+  for (const t of TASK_IDS)
+    links.push(link(++linkId, t, DESIGN, "derives_from"))
+  for (let i = 2; i < TASK_IDS.length; i++)
+    links.push(link(++linkId, TASK_IDS[i], TASK_IDS[i - 1], "depends_on"))
+  links.push(link(++linkId, REVIEW, 16, "reviews"))
+  return { artifacts, links }
+}
+
+describe("DagGraph folded connectors", () => {
+  it("folds issue #1's 34 lineage edges into 3 connectors (12/12/10)", () => {
+    const { artifacts, links } = issueOneFixture()
+    const { container } = render(
+      <DagGraph {...base} artifacts={artifacts} links={links} />
+    )
+    const connectors = [...container.querySelectorAll("[data-connector]")]
+    expect(connectors).toHaveLength(3)
+    const total = (sel: string) =>
+      container.querySelector(sel)?.getAttribute("data-total")
+    expect(total('[data-connector="issue->requirement:lineage"]')).toBe("12")
+    expect(total('[data-connector="requirement->design:lineage"]')).toBe("12")
+    expect(total('[data-connector="design->implement:lineage"]')).toBe("10")
+  })
+
+  it("routes a skip connector around the empty phase it crosses (not hung on it)", () => {
+    // skip_design route: a task both derives_from and skips_to the requirement,
+    // leaving design empty. The skip must appear as its own dashed connector.
+    const { container } = render(
+      <DagGraph
+        {...base}
+        artifacts={[
+          art({ id: 1, kind: "issue" }),
+          art({ id: 2, kind: "requirement" }),
+          art({ id: 10, kind: "task", status: "in_progress" }),
+        ]}
+        links={[link(1, 10, 2, "derives_from"), link(2, 10, 2, "skips_to")]}
+      />
+    )
+    const skip = container.querySelector(
+      '[data-connector="requirement->implement:skip"]'
+    )
+    expect(skip).not.toBeNull()
+    expect(skip).toHaveAttribute("data-skip", "true")
+    // Design is crossed but holds nothing → placeholder, and no connector touches it.
+    expect(container.querySelector('[data-phase="design"]')).toHaveAttribute(
+      "data-placeholder",
+      "true"
+    )
+    expect(container.querySelector('[data-connector*="design"]')).toBeNull()
+  })
+
+  it("hides a zero-active connector by default and reveals it (with counts) on toggle", () => {
+    // design derives_from a superseded requirement → total 1, active 0.
+    const artifacts = [
+      art({ id: 14, kind: "design", status: "done" }),
+      art({ id: 3, kind: "requirement", status: "superseded" }),
+    ]
+    const links = [link(1, 14, 3, "derives_from")]
+    const { container } = render(
+      <DagGraph {...base} artifacts={artifacts} links={links} />
+    )
+    const sel = '[data-connector="requirement->design:lineage"]'
+    // Off: activeCount 0 → not drawn at all.
+    expect(container.querySelector(sel)).toBeNull()
+    // Reveal superseded.
+    fireEvent.click(container.querySelector("button[aria-pressed]")!)
+    const conn = container.querySelector(sel)
+    expect(conn).not.toBeNull()
+    expect(conn).toHaveAttribute("data-total", "1")
+    expect(conn).toHaveAttribute("data-active", "0")
+    expect(conn).toHaveAttribute("data-hidden", "1")
+  })
+})
+
+describe("DagGraph superseded toggle", () => {
+  it("renders an all-dead phase as a placeholder, then solid + dimmed on reveal", () => {
+    const artifacts = [
+      art({ id: 1, kind: "issue", status: "done" }),
+      art({ id: 2, kind: "requirement", status: "superseded" }),
+    ]
+    const { container } = render(<DagGraph {...base} artifacts={artifacts} />)
+    // Off: the requirement phase has only a dead member → placeholder, no card.
+    expect(
+      container.querySelector('[data-phase="requirement"]')
+    ).toHaveAttribute("data-placeholder", "true")
+    expect(container.querySelector('[data-artifact-id="2"]')).toBeNull()
+    // Reveal: the phase goes solid and the dead member renders dimmed.
+    fireEvent.click(container.querySelector("button[aria-pressed]")!)
+    expect(
+      container.querySelector('[data-phase="requirement"]')
+    ).not.toHaveAttribute("data-placeholder")
+    const card = container.querySelector('[data-artifact-id="2"]')
+    expect(card).not.toBeNull()
+    expect(card?.className).toContain("opacity-50")
+  })
+})
+
+describe("DagGraph non-Implement pending ghosts", () => {
+  it("renders refine/design/reflect ghosts in their own phases", () => {
+    render(
+      <DagGraph
+        {...base}
+        artifacts={[art({ id: 1, kind: "issue" })]}
+        liveIterations={[
+          iter(101, "refine", { status: "running" }),
+          iter(102, "design", { status: "running" }),
+          iter(103, "reflect", { status: "queued" }),
+        ]}
+      />
+    )
+    // Ghost label = `${kind}: ${status}` under the echoing translator.
+    expect(screen.getByLabelText("requirement: running")).toBeInTheDocument()
+    expect(screen.getByLabelText("design: running")).toBeInTheDocument()
+    expect(screen.getByLabelText("reflection: queued")).toBeInTheDocument()
+  })
+})
+
+describe("DagGraph reviews are first-class folded nodes", () => {
+  const reviewFixture = {
+    artifacts: [
+      art({ id: 10, kind: "task", status: "in_progress" }),
+      art({
+        id: 20,
+        kind: "review",
+        status: "done",
+        verdict: "pass",
+        title: "R",
+      }),
+    ],
+    links: [link(1, 20, 10, "reviews")],
+  }
+
+  it("gives a folded review its own data-artifact-id and locate target", () => {
+    const onFocusConsumed = vi.fn()
+    const { container } = render(
+      <DagGraph
+        {...base}
+        artifacts={reviewFixture.artifacts}
+        links={reviewFixture.links}
+        focus={20}
+        onFocusConsumed={onFocusConsumed}
+      />
+    )
+    expect(container.querySelector('[data-artifact-id="20"]')).not.toBeNull()
+    // Locate resolves to the review node → scroll + consume.
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(onFocusConsumed).toHaveBeenCalledTimes(1)
+  })
+
+  it("selects the review (not its task) when its row is clicked", () => {
+    const onSelect = vi.fn()
+    const { container } = render(
+      <DagGraph
+        {...base}
+        artifacts={reviewFixture.artifacts}
+        links={reviewFixture.links}
+        onSelect={onSelect}
+      />
+    )
+    fireEvent.click(container.querySelector('[data-artifact-id="20"]')!)
+    expect(onSelect).toHaveBeenCalledWith(20)
   })
 })

@@ -33,7 +33,7 @@ import {
   ResizablePanel,
   ResizableHandle,
 } from "@/components/ui/resizable"
-import type { PendingNode } from "@/lib/loop-dag"
+import type { PhasePending } from "@/lib/loop-process-graph"
 import { DagGraph } from "@/components/loops/dag-graph"
 import { StagePipelineRail } from "@/components/loops/stage-pipeline-rail"
 import { IssueSettingsPanel } from "@/components/loops/issue-settings-dialog"
@@ -164,7 +164,7 @@ export function IssueDetail({
   // a conversation when it sends the briefing; queued ghosts have none yet, so
   // the card stays inert until then). Issue context labels the viewer.
   const onOpenIteration = useCallback(
-    (pending: PendingNode) => {
+    (pending: PhasePending) => {
       if (issue == null || pending.conversationId == null) return
       openIteration({
         conversationId: pending.conversationId,
