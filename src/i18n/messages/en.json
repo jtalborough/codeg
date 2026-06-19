@@ -3071,7 +3071,8 @@
       "openSession": "Open session",
       "attempt": "Attempt {n}",
       "gateDesignPrompt": "This design is awaiting your approval.",
-      "gateMergePrompt": "This result is ready to merge."
+      "gateMergePrompt": "This result is ready to merge.",
+      "iterationsUnsupported": "Iteration history isn't available on this server."
     },
     "inbox": {
       "title": "Inbox",
@@ -3315,7 +3316,10 @@
       "attention": "{count, plural, one {# item needs you} other {# items need you}}",
       "connector": "{count, plural, one {# link} other {# links}}",
       "connectorHidden": "{count, plural, one {# hidden} other {# hidden}}",
-      "unmappedNodes": "{count, plural, one {# unrecognized node} other {# unrecognized nodes}}"
+      "unmappedNodes": "{count, plural, one {# unrecognized node} other {# unrecognized nodes}}",
+      "agentRunBy": "Run by {agent}",
+      "attempts": "{count, plural, one {# attempt} other {# attempts}}",
+      "openSession": "Open session"
     },
     "stageRail": {
       "statusDone": "Done",

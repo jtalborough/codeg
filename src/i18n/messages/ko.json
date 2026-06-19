@@ -3071,7 +3071,8 @@
       "openSession": "세션 열기",
       "attempt": "{n}번째 시도",
       "gateDesignPrompt": "이 설계는 승인을 기다리고 있습니다.",
-      "gateMergePrompt": "이 결과는 병합할 준비가 되었습니다."
+      "gateMergePrompt": "이 결과는 병합할 준비가 되었습니다.",
+      "iterationsUnsupported": "이 서버에서는 이터레이션 기록을 사용할 수 없습니다."
     },
     "inbox": {
       "title": "받은 편지함",
@@ -3315,7 +3316,10 @@
       "attention": "{count, plural, other {# 건 처리 필요}}",
       "connector": "{count, plural, other {링크 #개}}",
       "connectorHidden": "{count, plural, other {# 개 숨김}}",
-      "unmappedNodes": "{count, plural, other {인식할 수 없는 노드 #개}}"
+      "unmappedNodes": "{count, plural, other {인식할 수 없는 노드 #개}}",
+      "agentRunBy": "{agent} 실행",
+      "attempts": "{count, plural, other {# 회 시도}}",
+      "openSession": "세션 열기"
     },
     "stageRail": {
       "statusDone": "완료",

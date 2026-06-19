@@ -3071,7 +3071,8 @@
       "openSession": "セッションを開く",
       "attempt": "{n} 回目の試行",
       "gateDesignPrompt": "この設計は承認待ちです。",
-      "gateMergePrompt": "この成果はマージ可能です。"
+      "gateMergePrompt": "この成果はマージ可能です。",
+      "iterationsUnsupported": "このサーバーではイテレーション履歴を利用できません。"
     },
     "inbox": {
       "title": "受信トレイ",
@@ -3315,7 +3316,10 @@
       "attention": "{count, plural, other {# 件の要対応}}",
       "connector": "{count, plural, other {# 件のリンク}}",
       "connectorHidden": "{count, plural, other {# 件は非表示}}",
-      "unmappedNodes": "{count, plural, other {# 件の認識できないノード}}"
+      "unmappedNodes": "{count, plural, other {# 件の認識できないノード}}",
+      "agentRunBy": "{agent} が実行",
+      "attempts": "{count, plural, other {# 回の試行}}",
+      "openSession": "セッションを開く"
     },
     "stageRail": {
       "statusDone": "完了",

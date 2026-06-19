@@ -3071,7 +3071,8 @@
       "openSession": "فتح الجلسة",
       "attempt": "المحاولة {n}",
       "gateDesignPrompt": "هذا التصميم بانتظار موافقتك.",
-      "gateMergePrompt": "هذه النتيجة جاهزة للدمج."
+      "gateMergePrompt": "هذه النتيجة جاهزة للدمج.",
+      "iterationsUnsupported": "سجل التكرارات غير متوفر على هذا الخادم."
     },
     "inbox": {
       "title": "صندوق الوارد",
@@ -3315,7 +3316,10 @@
       "attention": "{count, plural, other {# عنصرًا بحاجة إليك}}",
       "connector": "{count, plural, other {# رابط}}",
       "connectorHidden": "{count, plural, other {# مخفي}}",
-      "unmappedNodes": "{count, plural, other {# عقدة غير معروفة}}"
+      "unmappedNodes": "{count, plural, other {# عقدة غير معروفة}}",
+      "agentRunBy": "تشغيل بواسطة {agent}",
+      "attempts": "{count, plural, other {# محاولة}}",
+      "openSession": "فتح الجلسة"
     },
     "stageRail": {
       "statusDone": "تم",

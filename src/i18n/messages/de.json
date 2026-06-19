@@ -3071,7 +3071,8 @@
       "openSession": "Sitzung öffnen",
       "attempt": "Versuch {n}",
       "gateDesignPrompt": "Dieser Entwurf wartet auf deine Freigabe.",
-      "gateMergePrompt": "Dieses Ergebnis kann zusammengeführt werden."
+      "gateMergePrompt": "Dieses Ergebnis kann zusammengeführt werden.",
+      "iterationsUnsupported": "Der Iterationsverlauf ist auf diesem Server nicht verfügbar."
     },
     "inbox": {
       "title": "Posteingang",
@@ -3315,7 +3316,10 @@
       "attention": "{count, plural, one {# Element braucht dich} other {# Elemente brauchen dich}}",
       "connector": "{count, plural, one {# Verknüpfung} other {# Verknüpfungen}}",
       "connectorHidden": "{count, plural, one {# ausgeblendet} other {# ausgeblendet}}",
-      "unmappedNodes": "{count, plural, one {# nicht erkannter Knoten} other {# nicht erkannte Knoten}}"
+      "unmappedNodes": "{count, plural, one {# nicht erkannter Knoten} other {# nicht erkannte Knoten}}",
+      "agentRunBy": "Ausgeführt von {agent}",
+      "attempts": "{count, plural, one {# Versuch} other {# Versuche}}",
+      "openSession": "Sitzung öffnen"
     },
     "stageRail": {
       "statusDone": "Fertig",

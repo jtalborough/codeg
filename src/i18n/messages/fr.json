@@ -3071,7 +3071,8 @@
       "openSession": "Ouvrir la session",
       "attempt": "Tentative {n}",
       "gateDesignPrompt": "Cette conception attend votre approbation.",
-      "gateMergePrompt": "Ce résultat est prêt à être fusionné."
+      "gateMergePrompt": "Ce résultat est prêt à être fusionné.",
+      "iterationsUnsupported": "L'historique des itérations n'est pas disponible sur ce serveur."
     },
     "inbox": {
       "title": "Boîte de réception",
@@ -3315,7 +3316,10 @@
       "attention": "{count, plural, one {# élément requiert votre attention} other {# éléments requièrent votre attention}}",
       "connector": "{count, plural, one {# lien} other {# liens}}",
       "connectorHidden": "{count, plural, one {# masqué} other {# masqués}}",
-      "unmappedNodes": "{count, plural, one {# nœud non reconnu} other {# nœuds non reconnus}}"
+      "unmappedNodes": "{count, plural, one {# nœud non reconnu} other {# nœuds non reconnus}}",
+      "agentRunBy": "Exécuté par {agent}",
+      "attempts": "{count, plural, one {# tentative} other {# tentatives}}",
+      "openSession": "Ouvrir la session"
     },
     "stageRail": {
       "statusDone": "Terminé",

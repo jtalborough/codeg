@@ -3071,7 +3071,8 @@
       "openSession": "打开会话",
       "attempt": "第 {n} 次尝试",
       "gateDesignPrompt": "该设计正在等待你的批准。",
-      "gateMergePrompt": "该成果已可合并。"
+      "gateMergePrompt": "该成果已可合并。",
+      "iterationsUnsupported": "此服务器不支持迭代历史。"
     },
     "inbox": {
       "title": "收件箱",
@@ -3315,7 +3316,10 @@
       "attention": "{count, plural, other {# 项待处理}}",
       "connector": "{count, plural, other {# 条连接}}",
       "connectorHidden": "{count, plural, other {# 条已隐藏}}",
-      "unmappedNodes": "{count, plural, other {# 个无法识别的节点}}"
+      "unmappedNodes": "{count, plural, other {# 个无法识别的节点}}",
+      "agentRunBy": "由 {agent} 运行",
+      "attempts": "{count, plural, other {# 次尝试}}",
+      "openSession": "打开会话"
     },
     "stageRail": {
       "statusDone": "已完成",

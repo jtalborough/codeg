@@ -3071,7 +3071,8 @@
       "openSession": "Abrir sesión",
       "attempt": "Intento {n}",
       "gateDesignPrompt": "Este diseño está esperando tu aprobación.",
-      "gateMergePrompt": "Este resultado está listo para fusionarse."
+      "gateMergePrompt": "Este resultado está listo para fusionarse.",
+      "iterationsUnsupported": "El historial de iteraciones no está disponible en este servidor."
     },
     "inbox": {
       "title": "Bandeja de entrada",
@@ -3315,7 +3316,10 @@
       "attention": "{count, plural, one {# elemento te necesita} other {# elementos te necesitan}}",
       "connector": "{count, plural, one {# vínculo} other {# vínculos}}",
       "connectorHidden": "{count, plural, one {# oculto} other {# ocultos}}",
-      "unmappedNodes": "{count, plural, one {# nodo no reconocido} other {# nodos no reconocidos}}"
+      "unmappedNodes": "{count, plural, one {# nodo no reconocido} other {# nodos no reconocidos}}",
+      "agentRunBy": "Ejecutado por {agent}",
+      "attempts": "{count, plural, one {# intento} other {# intentos}}",
+      "openSession": "Abrir sesión"
     },
     "stageRail": {
       "statusDone": "Hecho",

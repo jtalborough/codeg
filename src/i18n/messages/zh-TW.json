@@ -3071,7 +3071,8 @@
       "openSession": "開啟工作階段",
       "attempt": "第 {n} 次嘗試",
       "gateDesignPrompt": "該設計正在等待你的核准。",
-      "gateMergePrompt": "該成果已可合併。"
+      "gateMergePrompt": "該成果已可合併。",
+      "iterationsUnsupported": "此伺服器不支援疊代歷史記錄。"
     },
     "inbox": {
       "title": "收件匣",
@@ -3315,7 +3316,10 @@
       "attention": "{count, plural, other {# 項待處理}}",
       "connector": "{count, plural, other {# 條連結}}",
       "connectorHidden": "{count, plural, other {# 條已隱藏}}",
-      "unmappedNodes": "{count, plural, other {# 個無法識別的節點}}"
+      "unmappedNodes": "{count, plural, other {# 個無法識別的節點}}",
+      "agentRunBy": "由 {agent} 執行",
+      "attempts": "{count, plural, other {# 次嘗試}}",
+      "openSession": "開啟工作階段"
     },
     "stageRail": {
       "statusDone": "已完成",
