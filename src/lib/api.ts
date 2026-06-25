@@ -38,6 +38,8 @@ import type {
   AgentSkillContent,
   ExpertListItem,
   ExpertInstallStatus,
+  LinkOp,
+  LinkOpResult,
   FolderHistoryEntry,
   FolderDetail,
   CreateChatConversationResult,
@@ -639,6 +641,20 @@ export async function expertsGetInstallStatus(
   return getTransport().call("experts_get_install_status", { expertId })
 }
 
+/** One round-trip snapshot of every (expert, agent) link state for the matrix. */
+export async function expertsListAllInstallStatuses(): Promise<
+  ExpertInstallStatus[]
+> {
+  return getTransport().call("experts_list_all_install_statuses")
+}
+
+/** Apply a batch of enable/disable ops; returns one result per op. */
+export async function expertsApplyLinks(
+  ops: LinkOp[]
+): Promise<LinkOpResult[]> {
+  return getTransport().call("experts_apply_links", { ops })
+}
+
 export async function expertsLinkToAgent(params: {
   expertId: string
   agentType: AgentType
@@ -707,6 +723,20 @@ export async function officecliSkillGetInstallStatus(
   skillId: string
 ): Promise<ExpertInstallStatus[]> {
   return getTransport().call("officecli_skill_get_install_status", { skillId })
+}
+
+/** One round-trip snapshot of every (skill, agent) link state for the matrix. */
+export async function officecliSkillListAllInstallStatuses(): Promise<
+  ExpertInstallStatus[]
+> {
+  return getTransport().call("officecli_skill_list_all_install_statuses")
+}
+
+/** Apply a batch of enable/disable ops; returns one result per op. */
+export async function officecliSkillApplyLinks(
+  ops: LinkOp[]
+): Promise<LinkOpResult[]> {
+  return getTransport().call("officecli_skill_apply_links", { ops })
 }
 
 export async function officecliSkillReadContent(

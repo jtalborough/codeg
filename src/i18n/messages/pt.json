@@ -2714,6 +2714,57 @@
     "save": "Salvar",
     "affectedRunningSessions": "{count, plural, one {# sessão ativa precisa reconectar para aplicar a alteração} other {# sessões ativas precisam reconectar para aplicar a alteração}}"
   },
+  "SkillMatrix": {
+    "loading": "Carregando…",
+    "searchPlaceholder": "Pesquisar por nome, id ou descrição",
+    "empty": "Nada para mostrar.",
+    "emptySearch": "Nenhuma correspondência para a pesquisa atual.",
+    "skillColumn": "Habilidade",
+    "selectAll": "Selecionar tudo visível",
+    "selectSkill": "Selecionar {name}",
+    "everything": {
+      "label": "Em massa",
+      "enable": "Ativar tudo (visível)",
+      "disable": "Desativar tudo (visível)"
+    },
+    "columnMenu": {
+      "enableAll": "Ativar todas as habilidades",
+      "disableAll": "Desativar todas as habilidades"
+    },
+    "rowMenu": {
+      "label": "Ações em massa para {name}",
+      "enableAll": "Ativar para todos os agentes",
+      "disableAll": "Desativar para todos os agentes"
+    },
+    "bulk": {
+      "selected": "{count} selecionados",
+      "targetAll": "Todos os agentes",
+      "targetSome": "{count} agentes",
+      "enable": "Ativar",
+      "disable": "Desativar",
+      "clear": "Limpar"
+    },
+    "confirm": {
+      "disableTitle": "Desativar estes links?",
+      "disableBody": "Isto remove {count} links de habilidades gerenciados pelo codeg. Habilidades que ocupam um diretório personalizado não são afetadas. Você pode reativá-las a qualquer momento.",
+      "cancel": "Cancelar",
+      "confirm": "Desativar"
+    },
+    "toasts": {
+      "loadFailed": "Falha ao carregar os status das habilidades",
+      "applyFailed": "Falha ao aplicar as alterações",
+      "enabled": "{count} links ativados",
+      "disabled": "{count} links desativados",
+      "enabledPartial": "{ok} ativados, {failed} falharam",
+      "disabledPartial": "{ok} desativados, {failed} falharam"
+    },
+    "detail": {
+      "enableForAgents": "Ativar para agentes",
+      "preview": "Visualização do SKILL.md",
+      "loadingContent": "Carregando conteúdo…"
+    },
+    "copyModeHint": "Copiado (não vinculado) — reative após atualizações para obter a versão mais recente"
+  },
   "ExpertsSettings": {
     "title": "Habilidades de Especialista",
     "description": "Ative fluxos de trabalho de habilidades selecionados e comprovados em campo para seus agentes de codificação de IA. Cada especialista é uma habilidade independente do projeto superpowers — o codeg gerencia a cópia central e a vincula aos agentes escolhidos.",

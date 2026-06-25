@@ -2714,6 +2714,57 @@
     "save": "Enregistrer",
     "affectedRunningSessions": "{count, plural, one {# session active doit se reconnecter pour appliquer la modification} other {# sessions actives doivent se reconnecter pour appliquer la modification}}"
   },
+  "SkillMatrix": {
+    "loading": "Chargement…",
+    "searchPlaceholder": "Rechercher par nom, id ou description",
+    "empty": "Rien à afficher.",
+    "emptySearch": "Aucun résultat pour la recherche actuelle.",
+    "skillColumn": "Compétence",
+    "selectAll": "Tout sélectionner (visible)",
+    "selectSkill": "Sélectionner {name}",
+    "everything": {
+      "label": "En masse",
+      "enable": "Tout activer (visible)",
+      "disable": "Tout désactiver (visible)"
+    },
+    "columnMenu": {
+      "enableAll": "Activer toutes les compétences",
+      "disableAll": "Désactiver toutes les compétences"
+    },
+    "rowMenu": {
+      "label": "Actions groupées pour {name}",
+      "enableAll": "Activer pour tous les agents",
+      "disableAll": "Désactiver pour tous les agents"
+    },
+    "bulk": {
+      "selected": "{count} sélectionné(s)",
+      "targetAll": "Tous les agents",
+      "targetSome": "{count} agents",
+      "enable": "Activer",
+      "disable": "Désactiver",
+      "clear": "Effacer"
+    },
+    "confirm": {
+      "disableTitle": "Désactiver ces liens ?",
+      "disableBody": "Cela supprimera {count} liens de compétences gérés par codeg. Les compétences occupant un répertoire personnalisé ne sont pas touchées. Vous pouvez les réactiver à tout moment.",
+      "cancel": "Annuler",
+      "confirm": "Désactiver"
+    },
+    "toasts": {
+      "loadFailed": "Échec du chargement des états des compétences",
+      "applyFailed": "Échec de l'application des modifications",
+      "enabled": "{count} liens activés",
+      "disabled": "{count} liens désactivés",
+      "enabledPartial": "{ok} activés, {failed} échoués",
+      "disabledPartial": "{ok} désactivés, {failed} échoués"
+    },
+    "detail": {
+      "enableForAgents": "Activer pour les agents",
+      "preview": "Aperçu de SKILL.md",
+      "loadingContent": "Chargement du contenu…"
+    },
+    "copyModeHint": "Copié (non lié) — réactivez après les mises à jour pour obtenir la dernière version"
+  },
   "ExpertsSettings": {
     "title": "Compétences d'experts",
     "description": "Activez des workflows de compétences soigneusement sélectionnés et éprouvés pour vos agents de codage IA. Chaque expert est une compétence autonome du projet superpowers — codeg gère la copie centrale et la lie aux agents que vous choisissez.",

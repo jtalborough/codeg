@@ -2714,6 +2714,57 @@
     "save": "Speichern",
     "affectedRunningSessions": "{count, plural, one {# laufende Sitzung muss zum Anwenden neu verbunden werden} other {# laufende Sitzungen müssen zum Anwenden neu verbunden werden}}"
   },
+  "SkillMatrix": {
+    "loading": "Wird geladen…",
+    "searchPlaceholder": "Nach Name, ID oder Beschreibung suchen",
+    "empty": "Nichts anzuzeigen.",
+    "emptySearch": "Keine Treffer für die aktuelle Suche.",
+    "skillColumn": "Skill",
+    "selectAll": "Alle sichtbaren auswählen",
+    "selectSkill": "{name} auswählen",
+    "everything": {
+      "label": "Sammelaktion",
+      "enable": "Alle aktivieren (sichtbar)",
+      "disable": "Alle deaktivieren (sichtbar)"
+    },
+    "columnMenu": {
+      "enableAll": "Alle Skills aktivieren",
+      "disableAll": "Alle Skills deaktivieren"
+    },
+    "rowMenu": {
+      "label": "Sammelaktionen für {name}",
+      "enableAll": "Für alle Agenten aktivieren",
+      "disableAll": "Für alle Agenten deaktivieren"
+    },
+    "bulk": {
+      "selected": "{count} ausgewählt",
+      "targetAll": "Alle Agenten",
+      "targetSome": "{count} Agenten",
+      "enable": "Aktivieren",
+      "disable": "Deaktivieren",
+      "clear": "Leeren"
+    },
+    "confirm": {
+      "disableTitle": "Diese Verknüpfungen deaktivieren?",
+      "disableBody": "Dadurch werden {count} von codeg verwaltete Skill-Verknüpfungen entfernt. Skills, die ein eigenes Verzeichnis belegen, bleiben unberührt. Du kannst sie jederzeit wieder aktivieren.",
+      "cancel": "Abbrechen",
+      "confirm": "Deaktivieren"
+    },
+    "toasts": {
+      "loadFailed": "Skill-Status konnte nicht geladen werden",
+      "applyFailed": "Änderungen konnten nicht angewendet werden",
+      "enabled": "{count} Verknüpfungen aktiviert",
+      "disabled": "{count} Verknüpfungen deaktiviert",
+      "enabledPartial": "{ok} aktiviert, {failed} fehlgeschlagen",
+      "disabledPartial": "{ok} deaktiviert, {failed} fehlgeschlagen"
+    },
+    "detail": {
+      "enableForAgents": "Für Agenten aktivieren",
+      "preview": "SKILL.md-Vorschau",
+      "loadingContent": "Inhalt wird geladen…"
+    },
+    "copyModeHint": "Kopiert (nicht verknüpft) – nach Updates erneut aktivieren, um die neueste Version zu erhalten"
+  },
   "ExpertsSettings": {
     "title": "Experten-Skills",
     "description": "Aktivieren Sie kuratierte, praxiserprobte Skill-Workflows für Ihre KI-Coding-Agents. Jeder Experte ist ein eigenständiger Skill aus dem superpowers-Projekt — codeg verwaltet die zentrale Kopie und verknüpft sie mit den von Ihnen ausgewählten Agents.",
