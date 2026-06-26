@@ -52,6 +52,12 @@ export function EditChatChannelDialog({
       ? config.allowed_senders.join("\n")
       : ""
   )
+  const [workingDir, setWorkingDir] = useState<string>(
+    typeof config.working_dir === "string" ? config.working_dir : ""
+  )
+  const [agentType, setAgentType] = useState<string>(
+    typeof config.agent_type === "string" ? config.agent_type : ""
+  )
   const [dailyReportEnabled, setDailyReportEnabled] = useState(
     channel.daily_report_enabled
   )
@@ -93,10 +99,13 @@ export function EditChatChannelDialog({
             ? { app_id: appId, chat_id: chatId }
             : { chat_id: chatId }
 
-      const configJson = JSON.stringify({
+      const configObj: Record<string, unknown> = {
         ...baseConfig,
         allowed_senders: allowedSendersArr,
-      })
+      }
+      if (workingDir.trim()) configObj.working_dir = workingDir.trim()
+      if (agentType.trim()) configObj.agent_type = agentType.trim()
+      const configJson = JSON.stringify(configObj)
 
       await updateChatChannel({
         id: channel.id,
@@ -127,6 +136,8 @@ export function EditChatChannelDialog({
     appId,
     baseUrl,
     allowedSenders,
+    workingDir,
+    agentType,
     dailyReportEnabled,
     dailyReportTime,
     onOpenChange,
@@ -201,6 +212,34 @@ export function EditChatChannelDialog({
               <Input value={baseUrl} disabled />
             </div>
           )}
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Default folder</label>
+            <Input
+              value={workingDir}
+              onChange={(e) => setWorkingDir(e.target.value)}
+              placeholder="/home/rai/src/codeg"
+              className="font-mono text-xs"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              The folder this channel&apos;s agent works in by default. Plain
+              messages talk to that agent; override with /folder.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Default agent</label>
+            <Input
+              value={agentType}
+              onChange={(e) => setAgentType(e.target.value)}
+              placeholder="claude_code"
+              className="font-mono text-xs"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Agent type id (e.g. claude_code, codex, gemini, openclaw).
+              Override with /agent.
+            </p>
+          </div>
 
           <div className="space-y-1.5">
             <label className="text-xs font-medium">Allowed Sender IDs</label>

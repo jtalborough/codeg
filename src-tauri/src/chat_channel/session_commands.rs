@@ -5,6 +5,7 @@ use std::time::Instant;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::Mutex;
 
+use super::channel_config;
 use super::i18n::{self, Lang};
 use super::session_bridge::{ActiveSession, SessionBridge};
 use super::types::{MessageLevel, RichMessage};
@@ -12,7 +13,9 @@ use crate::acp::manager::ConnectionManager;
 use crate::acp::registry::all_acp_agents;
 use crate::acp::types::PromptInputBlock;
 use crate::db::entities::conversation;
-use crate::db::service::{conversation_service, folder_service, sender_context_service};
+use crate::db::service::{
+    chat_channel_service, conversation_service, folder_service, sender_context_service,
+};
 use crate::models::agent::AgentType;
 use crate::web::event_bridge::EventEmitter;
 
@@ -256,11 +259,29 @@ pub async fn handle_task(
         }
     };
 
+    // Channel-level default agent binding ("talk to one agent"): used when the
+    // sender hasn't picked a folder/agent via /folder or /agent.
+    let defaults = match chat_channel_service::get_by_id(db, channel_id).await {
+        Ok(Some(ch)) => channel_config::parse(&ch.config_json),
+        _ => channel_config::ChannelDefaults::default(),
+    };
+
+    // Folder: sender's current selection, else the channel's default working_dir
+    // (resolved to a folder row), else prompt the user to pick one.
     let folder_id = match ctx.current_folder_id {
         Some(id) => id,
-        None => {
-            return RichMessage::info(i18n::no_folder_selected(lang, prefix));
-        }
+        None => match defaults.working_dir.as_deref() {
+            Some(path) => match folder_service::add_folder(db, path).await {
+                Ok(f) => f.id,
+                Err(e) => {
+                    return RichMessage::error(format!(
+                        "{}{e}",
+                        i18n::failed_to_add_folder_label(lang)
+                    ));
+                }
+            },
+            None => return RichMessage::info(i18n::no_folder_selected(lang, prefix)),
+        },
     };
 
     // 2. Get folder info
@@ -271,8 +292,12 @@ pub async fn handle_task(
         }
     };
 
-    // 3. Resolve agent type
-    let agent_type = match resolve_agent_type(&ctx.current_agent_type, &folder.default_agent_type) {
+    // 3. Resolve agent type: sender's choice, else channel default, else folder default.
+    let agent_pref = ctx
+        .current_agent_type
+        .clone()
+        .or_else(|| defaults.agent_type.clone());
+    let agent_type = match resolve_agent_type(&agent_pref, &folder.default_agent_type) {
         Some(at) => at,
         None => {
             return RichMessage::info(i18n::no_agent_selected(lang, prefix));

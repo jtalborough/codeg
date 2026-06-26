@@ -1,5 +1,6 @@
 pub mod authz;
 pub mod backends;
+pub mod channel_config;
 pub mod command_dispatcher;
 pub mod command_handlers;
 pub mod error;

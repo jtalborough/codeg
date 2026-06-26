@@ -196,7 +196,16 @@ async fn dispatch_command(
                 })
                 .await;
             }
-            return command_handlers::handle_help(prefix, lang);
+            // No active session: treat plain text as "talk to the agent" — start a
+            // task against the channel's default (or sender's current) folder+agent.
+            // An empty message just shows help.
+            if text.is_empty() {
+                return command_handlers::handle_help(prefix, lang);
+            }
+            return session_commands::handle_task(
+                db, text, channel_id, sender_id, conn_mgr, emitter, bridge, lang, prefix,
+            )
+            .await;
         }
     };
 
