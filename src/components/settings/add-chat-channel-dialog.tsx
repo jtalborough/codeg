@@ -91,7 +91,7 @@ export function AddChatChannelDialog({
     try {
       const allowedSendersArr = allowedSenders
         .split("\n")
-        .map((s) => s.trim())
+        .map((s: string) => s.trim())
         .filter(Boolean)
 
       const baseConfig =

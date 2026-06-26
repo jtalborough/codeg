@@ -47,7 +47,7 @@ export function EditChatChannelDialog({
   const [chatId, setChatId] = useState(config.chat_id ?? "")
   const [appId, setAppId] = useState(config.app_id ?? "")
   const [baseUrl] = useState(config.base_url ?? "")
-  const [allowedSenders, setAllowedSenders] = useState(
+  const [allowedSenders, setAllowedSenders] = useState<string>(
     Array.isArray(config.allowed_senders)
       ? config.allowed_senders.join("\n")
       : ""
@@ -83,7 +83,7 @@ export function EditChatChannelDialog({
     try {
       const allowedSendersArr = allowedSenders
         .split("\n")
-        .map((s) => s.trim())
+        .map((s: string) => s.trim())
         .filter(Boolean)
 
       const baseConfig =
