@@ -2458,12 +2458,15 @@ export function MessageInput({
   // textarea, instead of always jumping to the end.
   const handleChromeMouseDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
-      if (disabled || !isComposerChromeClick(e.target)) return
+      // Not gated on `disabled`: the editor stays editable while connecting (see
+      // `handleSend`), so chrome clicks must focus too — else only the existing
+      // text line is clickable and the blank area below it is dead until ready.
+      if (!isComposerChromeClick(e.target)) return
       // Keep the editor from blurring before we refocus it.
       e.preventDefault()
       editorRef.current?.focusAtCoords(e.clientX, e.clientY)
     },
-    [disabled]
+    []
   )
 
   const handleContainerDragOver = useCallback(
