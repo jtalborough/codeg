@@ -295,12 +295,13 @@ async fn process_envelope(
         }
     }
 
-    // A permission request from a session that was started FROM a chat channel
-    // is already handled interactively (with `/approve`, `/deny`) by the session
-    // relay, scoped to its owning channel. Suppress the generic global push for
-    // those connections so they aren't double-notified — the global event feed
-    // exists for the desktop / web sessions the user isn't driving from chat.
-    if event_type == "permission_request"
+    // Events from a session started FROM a chat channel are already relayed
+    // (cleanly, scoped to its owning channel) by the session relay: permission
+    // requests interactively via `/approve`/`/deny`, and the reply at turn end.
+    // Suppress the generic global push for those connections so they aren't
+    // double-notified — the global event feed exists for the desktop / web
+    // sessions the user isn't driving from chat.
+    if matches!(event_type.as_str(), "permission_request" | "turn_complete")
         && bridge.lock().await.get(&envelope.connection_id).is_some()
     {
         return;

@@ -381,8 +381,9 @@ pub async fn handle_task(
     )
     .await;
 
-    RichMessage::info(format!("[{}] #{} @ {}", agent_type, conv.id, folder.name,))
-        .with_title(i18n::task_started_title(lang))
+    // Stay silent on a successful start — the chat shows only the agent's reply
+    // (arriving at TurnComplete), not a "Task Started" ack.
+    RichMessage::silent()
 }
 
 /// Compare two absolute paths ignoring a trailing slash.
