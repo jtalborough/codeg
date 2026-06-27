@@ -194,6 +194,11 @@ interface MessageInputProps {
   attachmentTabId?: string | null
   draftStorageKey?: string | null
   isActive?: boolean
+  /** Paint the flowing active-session gradient on the composer border. Set only
+   *  for the active tab while tiled across multiple sessions; a lone or
+   *  non-tiled session keeps the plain default border. Independent of
+   *  `isActive` (which still drives auto-focus/connect). */
+  showActiveFlow?: boolean
   onEnqueue?: (draft: PromptDraft, modeId: string | null) => void
   /** Id of the queue item being edited — the stable key for (re)hydration, so
    *  switching between two items with identical display text still reloads. */
@@ -476,6 +481,7 @@ export function MessageInput({
   attachmentTabId,
   draftStorageKey,
   isActive = false,
+  showActiveFlow = false,
   onEnqueue,
   editingItemId,
   editingDraftText,
@@ -2724,11 +2730,13 @@ export function MessageInput({
                 folderBranchPickerAttached
                   ? "bg-background focus-within:border-ring focus-within:ring-[3px] focus-within:ring-inset focus-within:ring-ring/50"
                   : "focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50",
-                // Active session: a gradient flows around the border, but ONLY
+                // Active session, tiled across multiple sessions: a gradient
+                // flows around the border to mark which tile is active — but ONLY
                 // while the composer itself is not focused. Focusing it hides the
-                // flow (globals.css) so the default focus ring above takes over;
-                // an inactive session shows the plain default border.
-                isActive && "codeg-composer-flow",
+                // flow (globals.css) so the default focus ring above takes over.
+                // A lone/non-tiled session (showActiveFlow=false) and inactive
+                // tiles show the plain default border.
+                showActiveFlow && "codeg-composer-flow",
                 !folderBranchPickerAttached &&
                   showDragActive &&
                   "ring-1 ring-primary/40",

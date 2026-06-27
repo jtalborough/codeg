@@ -111,6 +111,11 @@ interface ConversationTabViewProps {
   agentType: AgentType
   workingDir?: string
   isActive: boolean
+  /** Drive the composer's flowing active-session border. True only for the
+   *  active tab while tiled across multiple sessions — the one place the flow
+   *  serves as the "which tile is active" cue. Distinct from `isActive`, which
+   *  also governs auto-focus/connect and is true even for a lone session. */
+  showActiveFlow: boolean
   reloadSignal: number
 }
 
@@ -180,6 +185,7 @@ const ConversationTabView = memo(function ConversationTabView({
   agentType,
   workingDir,
   isActive,
+  showActiveFlow,
   reloadSignal,
 }: ConversationTabViewProps) {
   const t = useTranslations("Folder.conversation")
@@ -1361,6 +1367,7 @@ const ConversationTabView = memo(function ConversationTabView({
       onAddFeedback={feedback.featureEnabled ? feedback.openDialog : undefined}
       feedbackAddDisabled={!feedback.canSubmit}
       isActive={isActive}
+      showActiveFlow={showActiveFlow}
       queue={msgQueue}
       onEnqueue={mqEnqueue}
       onQueueReorder={mqReorder}
@@ -1444,6 +1451,7 @@ const ConversationTabView = memo(function ConversationTabView({
               attachmentTabId={tabId}
               draftStorageKey={draftStorageKey}
               isActive={isActive}
+              showActiveFlow={showActiveFlow}
               onAddFeedback={
                 feedback.featureEnabled ? feedback.openDialog : undefined
               }
@@ -1879,6 +1887,7 @@ export function ConversationDetailPanel() {
           agentType={tab.agentType}
           workingDir={tab.workingDir ?? getFolder(tab.folderId)?.path}
           isActive={active}
+          showActiveFlow={canTile && active}
           reloadSignal={reloadByTabId[tab.id] ?? 0}
         />
       </div>
