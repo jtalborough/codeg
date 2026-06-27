@@ -266,20 +266,21 @@ pub async fn handle_task(
         _ => channel_config::ChannelDefaults::default(),
     };
 
-    // Folder: sender's current selection, else the channel's default working_dir
-    // (resolved to a folder row), else prompt the user to pick one.
-    let folder_id = match ctx.current_folder_id {
-        Some(id) => id,
-        None => match defaults.working_dir.as_deref() {
-            Some(path) => match folder_service::add_folder(db, path).await {
-                Ok(f) => f.id,
-                Err(e) => {
-                    return RichMessage::error(format!(
-                        "{}{e}",
-                        i18n::failed_to_add_folder_label(lang)
-                    ));
-                }
-            },
+    // Folder: the channel's persona binding (working_dir) is authoritative when
+    // set — so a bound channel always *is* its persona, regardless of any stale
+    // sticky selection. Otherwise fall back to the sender's /folder choice.
+    let folder_id = match defaults.working_dir.as_deref() {
+        Some(path) => match folder_service::add_folder(db, path).await {
+            Ok(f) => f.id,
+            Err(e) => {
+                return RichMessage::error(format!(
+                    "{}{e}",
+                    i18n::failed_to_add_folder_label(lang)
+                ));
+            }
+        },
+        None => match ctx.current_folder_id {
+            Some(id) => id,
             None => return RichMessage::info(i18n::no_folder_selected(lang, prefix)),
         },
     };
@@ -292,11 +293,11 @@ pub async fn handle_task(
         }
     };
 
-    // 3. Resolve agent type: sender's choice, else channel default, else folder default.
-    let agent_pref = ctx
-        .current_agent_type
+    // 3. Resolve agent type: channel persona default, else sender choice, else folder default.
+    let agent_pref = defaults
+        .agent_type
         .clone()
-        .or_else(|| defaults.agent_type.clone());
+        .or_else(|| ctx.current_agent_type.clone());
     let agent_type = match resolve_agent_type(&agent_pref, &folder.default_agent_type) {
         Some(at) => at,
         None => {
@@ -382,6 +383,119 @@ pub async fn handle_task(
 
     RichMessage::info(format!("[{}] #{} @ {}", agent_type, conv.id, folder.name,))
         .with_title(i18n::task_started_title(lang))
+}
+
+/// Compare two absolute paths ignoring a trailing slash.
+fn same_path(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
+/// Plain-text "talk to the persona" handler. Resumes the channel's ongoing
+/// conversation *with full memory* (via its agent session id) when one exists in
+/// the persona folder; otherwise starts a fresh task. `/task` always starts fresh.
+///
+/// Only a conversation living in the persona folder is resumed, so a stale
+/// pointer at a different persona's folder can't leak its chat in — it falls
+/// through to a fresh task in the correct folder instead.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_message(
+    db: &DatabaseConnection,
+    text: &str,
+    channel_id: i32,
+    sender_id: &str,
+    conn_mgr: &ConnectionManager,
+    emitter: &EventEmitter,
+    bridge: &Arc<Mutex<SessionBridge>>,
+    lang: Lang,
+    prefix: &str,
+) -> RichMessage {
+    let ctx = match sender_context_service::get_or_create(db, channel_id, sender_id).await {
+        Ok(c) => c,
+        Err(e) => {
+            return RichMessage::error(format!("{}{e}", i18n::failed_to_load_context_label(lang)))
+        }
+    };
+    let defaults = match chat_channel_service::get_by_id(db, channel_id).await {
+        Ok(Some(ch)) => channel_config::parse(&ch.config_json),
+        _ => channel_config::ChannelDefaults::default(),
+    };
+
+    if let Some(conv_id) = ctx.current_conversation_id {
+        if let Ok(conv) = conversation_service::get_by_id(db, conv_id).await {
+            let folder = folder_service::get_folder_by_id(db, conv.folder_id)
+                .await
+                .ok()
+                .flatten();
+            let folder_matches = match (&defaults.working_dir, &folder) {
+                (Some(wd), Some(f)) => same_path(wd, &f.path),
+                (None, _) => true,
+                _ => false,
+            };
+            let resumable = conv.external_id.is_some() && conv.status != "cancelled";
+            if resumable && folder_matches {
+                if let Some(folder) = folder {
+                    let owner_label = format!("chat_channel:{}:{}", channel_id, sender_id);
+                    let connection_id = match conn_mgr
+                        .spawn_agent(
+                            conv.agent_type,
+                            Some(folder.path.clone()),
+                            conv.external_id.clone(),
+                            BTreeMap::new(),
+                            owner_label,
+                            emitter.clone(),
+                            None,
+                            BTreeMap::new(),
+                        )
+                        .await
+                    {
+                        Ok(id) => id,
+                        Err(e) => {
+                            return RichMessage::error(format!(
+                                "{}{e}",
+                                i18n::failed_to_start_agent_label(lang)
+                            ))
+                        }
+                    };
+                    {
+                        let session = ActiveSession {
+                            channel_id,
+                            sender_id: sender_id.to_string(),
+                            conversation_id: conv.id,
+                            connection_id: connection_id.clone(),
+                            agent_type: conv.agent_type,
+                            content_buffer: String::new(),
+                            tool_calls: Vec::new(),
+                            tool_call_inputs: std::collections::HashMap::new(),
+                            delegation_rendered: std::collections::HashSet::new(),
+                            last_flushed: Instant::now(),
+                            pending_prompt: Some(text.to_string()),
+                            permission_pending: None,
+                        };
+                        bridge.lock().await.register(connection_id.clone(), session);
+                    }
+                    let _ = sender_context_service::update_session(
+                        db,
+                        channel_id,
+                        sender_id,
+                        Some(conv.id),
+                        Some(connection_id),
+                    )
+                    .await;
+                    return RichMessage::info(format!(
+                        "[{}] #{} @ {}",
+                        conv.agent_type, conv.id, folder.name
+                    ))
+                    .with_title(i18n::session_resumed_title(lang));
+                }
+            }
+        }
+    }
+
+    // No resumable conversation in the persona folder: start fresh.
+    handle_task(
+        db, text, channel_id, sender_id, conn_mgr, emitter, bridge, lang, prefix,
+    )
+    .await
 }
 
 // ── /sessions ──
