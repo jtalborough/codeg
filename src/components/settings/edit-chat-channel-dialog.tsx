@@ -58,6 +58,9 @@ export function EditChatChannelDialog({
   const [agentType, setAgentType] = useState<string>(
     typeof config.agent_type === "string" ? config.agent_type : ""
   )
+  const [autoApprove, setAutoApprove] = useState<boolean>(
+    config.auto_approve === true
+  )
   const [dailyReportEnabled, setDailyReportEnabled] = useState(
     channel.daily_report_enabled
   )
@@ -105,6 +108,7 @@ export function EditChatChannelDialog({
       }
       if (workingDir.trim()) configObj.working_dir = workingDir.trim()
       if (agentType.trim()) configObj.agent_type = agentType.trim()
+      if (autoApprove) configObj.auto_approve = true
       const configJson = JSON.stringify(configObj)
 
       await updateChatChannel({
@@ -138,6 +142,7 @@ export function EditChatChannelDialog({
     allowedSenders,
     workingDir,
     agentType,
+    autoApprove,
     dailyReportEnabled,
     dailyReportTime,
     onOpenChange,
@@ -239,6 +244,19 @@ export function EditChatChannelDialog({
               Agent type id (e.g. claude_code, codex, gemini, openclaw).
               Override with /agent.
             </p>
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="space-y-0.5">
+              <label className="text-xs font-medium">
+                Auto-approve tool calls
+              </label>
+              <p className="text-[11px] text-muted-foreground">
+                Skip per-action permission prompts for this channel. Use for a
+                trusted persona working in its own workspace.
+              </p>
+            </div>
+            <Switch checked={autoApprove} onCheckedChange={setAutoApprove} />
           </div>
 
           <div className="space-y-1.5">

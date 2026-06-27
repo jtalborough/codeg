@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use sea_orm::DatabaseConnection;
 use tokio::sync::Mutex;
@@ -16,12 +16,13 @@ use crate::acp::types::{
     AcpEvent, ConnectionStatus, DelegationResultSummary, EventEnvelope, PromptInputBlock,
 };
 
-use crate::db::service::{app_metadata_service, conversation_service, sender_context_service};
+use crate::db::service::{
+    app_metadata_service, chat_channel_service, conversation_service, sender_context_service,
+};
 
+use super::channel_config;
 use super::manager::ChatChannelManager;
 
-const FLUSH_INTERVAL_SECS: u64 = 10;
-const BUFFER_FLUSH_THRESHOLD: usize = 500;
 const MAX_MESSAGE_LEN: usize = 2000;
 const MESSAGE_LANGUAGE_KEY: &str = "chat_message_language";
 const COMMAND_PREFIX_KEY: &str = "chat_command_prefix";
@@ -38,37 +39,28 @@ pub fn spawn_session_event_subscriber(
     let metrics = Arc::clone(bus.metrics());
 
     tokio::spawn(async move {
-        let mut last_heartbeat = Instant::now();
-
+        // Interim "is responding…" progress pings were removed — they flooded the
+        // chat with a message per tool call. The agent's reply is delivered once,
+        // at TurnComplete. (A native "typing…" indicator could replace them later.)
         loop {
-            tokio::select! {
-                result = rx.recv() => {
-                    let envelope_arc = match result {
-                        Ok(e) => e,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!("[SessionEventSub] lagged {n} events");
-                            metrics.lagged_count.fetch_add(n, Ordering::Relaxed);
-                            continue;
-                        }
-                        Err(_) => break,
-                    };
+            let envelope_arc = match rx.recv().await {
+                Ok(e) => e,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("[SessionEventSub] lagged {n} events");
+                    metrics.lagged_count.fetch_add(n, Ordering::Relaxed);
+                    continue;
+                }
+                Err(_) => break,
+            };
 
-                    handle_acp_envelope(
-                        envelope_arc.as_ref(),
-                        &bridge,
-                        &manager,
-                        &conn_mgr,
-                        &db_conn,
-                    )
-                    .await;
-                }
-                _ = tokio::time::sleep(Duration::from_secs(FLUSH_INTERVAL_SECS)) => {
-                    if last_heartbeat.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS) {
-                        flush_progress(&bridge, &manager, &db_conn).await;
-                        last_heartbeat = Instant::now();
-                    }
-                }
-            }
+            handle_acp_envelope(
+                envelope_arc.as_ref(),
+                &bridge,
+                &manager,
+                &conn_mgr,
+                &db_conn,
+            )
+            .await;
         }
     })
 }
@@ -151,37 +143,11 @@ async fn handle_acp_envelope(
         }
 
         AcpEvent::ContentDelta { text } => {
-            // Collect flush info under the lock, then release before any IO.
-            let flush_info: Option<(i32, String, Option<String>)> = {
-                let mut guard = bridge.lock().await;
-                match guard.get_mut(connection_id) {
-                    Some(session) => {
-                        session.content_buffer.push_str(text);
-                        if session.content_buffer.len() >= BUFFER_FLUSH_THRESHOLD
-                            && session.last_flushed.elapsed() >= Duration::from_secs(2)
-                        {
-                            session.last_flushed = Instant::now();
-                            Some((
-                                session.channel_id,
-                                session.agent_type.to_string(),
-                                session.tool_calls.last().cloned(),
-                            ))
-                        } else {
-                            None
-                        }
-                    }
-                    None => None,
-                }
-            };
-
-            if let Some((channel_id, agent_label, last_tool)) = flush_info {
-                let lang = get_lang(db).await;
-                let mut status = super::i18n::agent_responding(lang, &agent_label);
-                if let Some(tool) = last_tool {
-                    status.push_str(&format!(" | {tool}"));
-                }
-                let msg = RichMessage::info(status);
-                let _ = manager.send_to_channel(channel_id, &msg).await;
+            // Accumulate the reply only; it is delivered in a single message at
+            // TurnComplete. Interim status pings are intentionally not sent.
+            let mut guard = bridge.lock().await;
+            if let Some(session) = guard.get_mut(connection_id) {
+                session.content_buffer.push_str(text);
             }
         }
 
@@ -356,8 +322,17 @@ async fn handle_acp_envelope(
                 let channel_id = session.channel_id;
                 let sender_id = session.sender_id.clone();
 
-                let auto_approve =
-                    sender_context_service::get_or_create(db, channel_id, &sender_id)
+                // Auto-approve when either the channel is configured to (a trusted
+                // persona working in its own workspace) or the sender opted in via
+                // `/approve always`.
+                let channel_auto = chat_channel_service::get_by_id(db, channel_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|ch| channel_config::parse(&ch.config_json).auto_approve)
+                    .unwrap_or(false);
+                let auto_approve = channel_auto
+                    || sender_context_service::get_or_create(db, channel_id, &sender_id)
                         .await
                         .map(|ctx| ctx.auto_approve)
                         .unwrap_or(false);
@@ -496,7 +471,9 @@ async fn handle_acp_envelope(
                                  next TurnComplete"
                             );
                         } else {
-                            tracing::error!("[SessionEventSub] failed to send deferred kickoff: {e}");
+                            tracing::error!(
+                                "[SessionEventSub] failed to send deferred kickoff: {e}"
+                            );
                             let msg = RichMessage::error(format!("Failed to send task: {e}"));
                             let _ = manager.send_to_channel(channel_id, &msg).await;
                         }
@@ -579,38 +556,6 @@ async fn handle_acp_envelope(
         }
 
         _ => {}
-    }
-}
-
-async fn flush_progress(
-    bridge: &Arc<Mutex<SessionBridge>>,
-    manager: &ChatChannelManager,
-    db: &DatabaseConnection,
-) {
-    let lang = get_lang(db).await;
-    let updates: Vec<(i32, String)> = {
-        let mut guard = bridge.lock().await;
-        let mut out = Vec::new();
-        for session in guard.all_sessions_mut() {
-            if !session.content_buffer.is_empty()
-                && session.last_flushed.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS)
-            {
-                session.last_flushed = Instant::now();
-                let last_tool = session.tool_calls.last().cloned();
-                let agent_label = session.agent_type.to_string();
-                let mut status = super::i18n::agent_responding(lang, &agent_label);
-                if let Some(tool) = last_tool {
-                    status.push_str(&format!(" | {tool}"));
-                }
-                out.push((session.channel_id, status));
-            }
-        }
-        out
-    };
-
-    for (channel_id, text) in updates {
-        let msg = RichMessage::info(text);
-        let _ = manager.send_to_channel(channel_id, &msg).await;
     }
 }
 
@@ -919,9 +864,7 @@ mod delegation_relay_tests {
         assert!(is_delegation_title("delegate_to_agent"));
         assert!(is_delegation_title("Delegate To Agent"));
         assert!(is_delegation_title("delegate-to-agent"));
-        assert!(is_delegation_title(
-            "mcp__codeg-mcp__delegate_to_agent"
-        ));
+        assert!(is_delegation_title("mcp__codeg-mcp__delegate_to_agent"));
         assert!(is_delegation_title("Run mcp__codeg__delegate_to_agent"));
         assert!(!is_delegation_title("agent"));
         assert!(!is_delegation_title("write"));

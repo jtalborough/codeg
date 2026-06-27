@@ -14,10 +14,14 @@ pub struct ChannelDefaults {
     pub working_dir: Option<String>,
     /// Default agent type string (serde form, e.g. `"claude_code"`), if configured.
     pub agent_type: Option<String>,
+    /// Auto-approve the agent's tool-call permission requests for this channel.
+    /// For a trusted persona reading/working in its own workspace, per-file
+    /// permission prompts are pure friction. Defaults to `false` (prompt).
+    pub auto_approve: bool,
 }
 
-/// Parse `working_dir` / `agent_type` from a channel `config_json` blob. Missing
-/// keys, blanks, and parse failures yield `None` for that field (not an error).
+/// Parse `working_dir` / `agent_type` / `auto_approve` from a channel `config_json`
+/// blob. Missing keys, blanks, and parse failures yield the field default.
 pub fn parse(config_json: &str) -> ChannelDefaults {
     let value: Value = serde_json::from_str(config_json).unwrap_or(Value::Null);
     let field = |key: &str| {
@@ -31,6 +35,10 @@ pub fn parse(config_json: &str) -> ChannelDefaults {
     ChannelDefaults {
         working_dir: field("working_dir"),
         agent_type: field("agent_type"),
+        auto_approve: value
+            .get("auto_approve")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
@@ -55,6 +63,7 @@ mod tests {
         let d = parse(cfg);
         assert_eq!(d.working_dir.as_deref(), Some("/home/rai/src/codeg"));
         assert_eq!(d.agent_type.as_deref(), Some("claude_code"));
+        assert!(!d.auto_approve);
     }
 
     #[test]
@@ -68,5 +77,12 @@ mod tests {
         let d = parse(r#"{"agent_type":"codex"}"#);
         assert_eq!(d.working_dir, None);
         assert_eq!(d.agent_type.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn auto_approve_parsed() {
+        assert!(parse(r#"{"auto_approve":true}"#).auto_approve);
+        assert!(!parse(r#"{"auto_approve":false}"#).auto_approve);
+        assert!(!parse(r#"{"auto_approve":"yes"}"#).auto_approve); // non-bool ignored
     }
 }
