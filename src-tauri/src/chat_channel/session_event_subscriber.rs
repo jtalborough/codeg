@@ -263,13 +263,10 @@ async fn handle_acp_envelope(
                             let _ = manager.send_to_channel(channel_id, &msg).await;
                         }
                     } else {
-                        let stored_input = session.tool_call_inputs.remove(tool_call_id);
-                        let input_ref = stored_input.as_deref().or(raw_input.as_deref());
-                        let body =
-                            format!(">> {}", format_tool_call_detail(effective_title, input_ref));
-                        drop(guard);
-                        let msg = RichMessage::info(body);
-                        let _ = manager.send_to_channel(channel_id, &msg).await;
+                        // Per-tool-call echoes (">> Read: …") are suppressed — they
+                        // flood the chat with one line per tool. Just clean up the
+                        // stored input; the reply is delivered at TurnComplete.
+                        session.tool_call_inputs.remove(tool_call_id);
                     }
                 }
             }
@@ -404,11 +401,7 @@ async fn handle_acp_envelope(
             }
         }
 
-        AcpEvent::TurnComplete {
-            stop_reason,
-            agent_type,
-            ..
-        } => {
+        AcpEvent::TurnComplete { stop_reason, .. } => {
             let mut guard = bridge.lock().await;
             if let Some(session) = guard.get_mut(connection_id) {
                 let channel_id = session.channel_id;
@@ -424,24 +417,15 @@ async fn handle_acp_envelope(
                 let deferred_kickoff = session.pending_prompt.take();
                 drop(guard);
 
-                let lang = get_lang(db).await;
-                let body = format_completion(&content, tool_count, lang);
-
-                let msg = RichMessage::info(body)
-                    .with_title(match lang {
-                        Lang::ZhCn | Lang::ZhTw => "任务完成",
-                        _ => "Turn Complete",
-                    })
-                    .with_field("Agent", agent_type)
-                    .with_field(
-                        match lang {
-                            Lang::ZhCn | Lang::ZhTw => "结束原因",
-                            _ => "Stop Reason",
-                        },
-                        localize_stop_reason(stop_reason, lang),
-                    );
-
-                let _ = manager.send_to_channel(channel_id, &msg).await;
+                // Send only the agent's reply — no "Turn Complete" title or
+                // Agent/Stop Reason chrome. Skip empty turns (e.g. a trailing
+                // session-end TurnComplete with no text) so the chat stays clean.
+                if !content.trim().is_empty() {
+                    let lang = get_lang(db).await;
+                    let body = format_completion(&content, tool_count, lang);
+                    let msg = RichMessage::info(body);
+                    let _ = manager.send_to_channel(channel_id, &msg).await;
+                }
 
                 if stop_reason == "end_turn" {
                     let _ = conversation_service::update_status(
@@ -611,97 +595,6 @@ fn format_completion(content: &str, tool_count: usize, lang: Lang) -> String {
             )
         }
     }
-}
-
-fn localize_stop_reason(reason: &str, lang: Lang) -> String {
-    match lang {
-        Lang::ZhCn => match reason {
-            "end_turn" => "正常结束",
-            "cancelled" => "已取消",
-            "max_tokens" => "达到最大长度",
-            "stop_sequence" => "遇到停止序列",
-            "error" => "错误",
-            "timeout" => "超时",
-            other => other,
-        },
-        Lang::ZhTw => match reason {
-            "end_turn" => "正常結束",
-            "cancelled" => "已取消",
-            "max_tokens" => "達到最大長度",
-            "stop_sequence" => "遇到停止序列",
-            "error" => "錯誤",
-            "timeout" => "逾時",
-            other => other,
-        },
-        Lang::Ja => match reason {
-            "end_turn" => "正常終了",
-            "cancelled" => "キャンセル",
-            "max_tokens" => "最大トークン数到達",
-            "stop_sequence" => "停止シーケンス",
-            "error" => "エラー",
-            "timeout" => "タイムアウト",
-            other => other,
-        },
-        Lang::Ko => match reason {
-            "end_turn" => "정상 종료",
-            "cancelled" => "취소됨",
-            "max_tokens" => "최대 길이 도달",
-            "stop_sequence" => "정지 시퀀스",
-            "error" => "오류",
-            "timeout" => "시간 초과",
-            other => other,
-        },
-        Lang::Es => match reason {
-            "end_turn" => "Finalizado",
-            "cancelled" => "Cancelado",
-            "max_tokens" => "Longitud máxima alcanzada",
-            "error" => "Error",
-            "timeout" => "Tiempo agotado",
-            other => other,
-        },
-        Lang::De => match reason {
-            "end_turn" => "Abgeschlossen",
-            "cancelled" => "Abgebrochen",
-            "max_tokens" => "Maximale Länge erreicht",
-            "error" => "Fehler",
-            "timeout" => "Zeitüberschreitung",
-            other => other,
-        },
-        Lang::Fr => match reason {
-            "end_turn" => "Terminé",
-            "cancelled" => "Annulé",
-            "max_tokens" => "Longueur maximale atteinte",
-            "error" => "Erreur",
-            "timeout" => "Délai dépassé",
-            other => other,
-        },
-        Lang::Pt => match reason {
-            "end_turn" => "Concluído",
-            "cancelled" => "Cancelado",
-            "max_tokens" => "Comprimento máximo atingido",
-            "error" => "Erro",
-            "timeout" => "Tempo esgotado",
-            other => other,
-        },
-        Lang::Ar => match reason {
-            "end_turn" => "اكتمل",
-            "cancelled" => "ملغى",
-            "max_tokens" => "تم بلوغ الحد الأقصى",
-            "error" => "خطأ",
-            "timeout" => "انتهت المهلة",
-            other => other,
-        },
-        Lang::En => match reason {
-            "end_turn" => "Completed",
-            "cancelled" => "Cancelled",
-            "max_tokens" => "Max length reached",
-            "stop_sequence" => "Stop sequence",
-            "error" => "Error",
-            "timeout" => "Timeout",
-            other => other,
-        },
-    }
-    .to_string()
 }
 
 /// Title-side match for `delegate_to_agent`. Title is free-form text the

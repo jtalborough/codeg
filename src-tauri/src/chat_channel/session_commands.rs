@@ -874,7 +874,9 @@ pub async fn handle_followup(req: FollowupRequest<'_>) -> RichMessage {
         ));
     }
 
-    RichMessage::info(i18n::message_sent(req.lang))
+    // The prompt was delivered to the agent; stay silent so the chat shows only
+    // the agent's reply (which arrives at TurnComplete), not a "Message sent" ack.
+    RichMessage::silent()
 }
 
 // ── /resume (list recent) ──

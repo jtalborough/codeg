@@ -110,30 +110,34 @@ pub fn spawn_command_dispatcher(
                 response.body.len()
             );
 
-            // Send response back via the same channel
-            let send_result = manager.send_to_channel(cmd.channel_id, &response).await;
-            let (status, error_detail) = match &send_result {
-                Ok(_) => ("sent", None),
-                Err(e) => {
-                    tracing::error!(
-                        "[ChatChannel] failed to send response for {:?} to channel {}: {e}",
-                        text,
-                        cmd.channel_id
-                    );
-                    ("failed", Some(e.to_string()))
-                }
-            };
+            // A silent response (e.g. a follow-up ack we suppress) is not sent —
+            // the chat shows only the agent's actual reply.
+            if !response.is_silent() {
+                // Send response back via the same channel
+                let send_result = manager.send_to_channel(cmd.channel_id, &response).await;
+                let (status, error_detail) = match &send_result {
+                    Ok(_) => ("sent", None),
+                    Err(e) => {
+                        tracing::error!(
+                            "[ChatChannel] failed to send response for {:?} to channel {}: {e}",
+                            text,
+                            cmd.channel_id
+                        );
+                        ("failed", Some(e.to_string()))
+                    }
+                };
 
-            let _ = chat_channel_message_log_service::create_log(
-                &db_conn,
-                cmd.channel_id,
-                "outbound",
-                "command_response",
-                &response.to_plain_text(),
-                status,
-                error_detail,
-            )
-            .await;
+                let _ = chat_channel_message_log_service::create_log(
+                    &db_conn,
+                    cmd.channel_id,
+                    "outbound",
+                    "command_response",
+                    &response.to_plain_text(),
+                    status,
+                    error_detail,
+                )
+                .await;
+            }
         }
     })
 }

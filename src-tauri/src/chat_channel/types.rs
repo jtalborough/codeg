@@ -100,6 +100,18 @@ impl RichMessage {
         self
     }
 
+    /// A message with nothing to show. The dispatcher skips sending these, so a
+    /// handler can intentionally stay silent (e.g. a follow-up ack we don't want
+    /// to clutter the chat with).
+    pub fn silent() -> Self {
+        Self::info(String::new())
+    }
+
+    /// Whether there is anything worth sending (title, body, or fields).
+    pub fn is_silent(&self) -> bool {
+        self.title.is_none() && self.body.trim().is_empty() && self.fields.is_empty()
+    }
+
     pub fn to_plain_text(&self) -> String {
         let mut text = String::new();
         if let Some(title) = &self.title {
