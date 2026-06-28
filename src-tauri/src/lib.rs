@@ -26,6 +26,7 @@ pub mod preferences;
 pub mod process;
 pub mod supervise;
 mod terminal;
+pub mod title_gen;
 pub mod update;
 pub mod web;
 pub mod workspace_state;

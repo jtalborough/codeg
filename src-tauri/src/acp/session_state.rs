@@ -328,6 +328,14 @@ pub struct SessionState {
     /// `delegation_call_id`-bound child outcome. Cleared on the next prompt.
     pub last_assistant_text: Option<String>,
 
+    /// Concatenated text of the FIRST user prompt seen on this connection.
+    /// Captured once (on the first `AcpEvent::UserMessage`) and never cleared,
+    /// so it doubles as a cheap first-turn signal AND a stable source for the
+    /// optional AI title generator (`title_gen`), which runs at TurnComplete
+    /// after `pending_user_message` has already been cleared. Not serialized:
+    /// backend-internal, like `turn_in_flight`.
+    pub first_user_text: Option<String>,
+
     /// The in-flight user prompt for the current turn, captured from
     /// `AcpEvent::UserMessage` and cleared on `TurnComplete` (alongside
     /// `live_message`). Carried on `to_snapshot()` so a client attaching
@@ -410,6 +418,7 @@ impl SessionState {
             delegation_token: None,
             feedback_tool_available: false,
             last_assistant_text: None,
+            first_user_text: None,
             pending_user_message: None,
             pending_user_message_started_at: None,
             turn_in_flight: false,
@@ -700,6 +709,24 @@ impl SessionState {
                     message_id: message_id.clone(),
                     blocks: blocks.clone(),
                 });
+                // Capture the FIRST user prompt's text exactly once (never
+                // cleared). Source for the optional `title_gen` AI titler and a
+                // cheap "is this the first turn?" signal — see field docs.
+                if self.first_user_text.is_none() {
+                    let text: String = blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            crate::acp::types::UserMessageBlock::Text { text } => {
+                                Some(text.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<&str>>()
+                        .join(" ");
+                    if !text.trim().is_empty() {
+                        self.first_user_text = Some(text);
+                    }
+                }
                 // Reference instant for the in-flight prompt's recency check in
                 // `apply_in_flight_message_id`. Set here (not at manager enqueue)
                 // so it tracks `pending_user_message` exactly.

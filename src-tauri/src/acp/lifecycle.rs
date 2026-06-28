@@ -231,9 +231,13 @@ pub(crate) async fn handle_event(
             else {
                 return Ok(());
             };
-            let (conversation_id, last_text) = {
+            let (conversation_id, last_text, first_user_text) = {
                 let snap = state_arc.read().await;
-                (snap.conversation_id, snap.last_assistant_text.clone())
+                (
+                    snap.conversation_id,
+                    snap.last_assistant_text.clone(),
+                    snap.first_user_text.clone(),
+                )
             };
             // No conversation row bound (defensive — should never happen in
             // practice since `send_prompt_linked` runs before TurnComplete can
@@ -255,6 +259,31 @@ pub(crate) async fn handle_event(
                     },
                 )
                 .await;
+            }
+
+            // Optional AI-generated title (default OFF). Fire-and-forget on a
+            // successful `end_turn` so it never blocks this handler or the
+            // delegation broker below. All gating (enabled flag, provider
+            // lookup) and `refresh_auto_title` idempotency live in `title_gen`;
+            // we keep the inline footprint to one spawn to minimise merge
+            // churn. `first_user_text` is `Some` only once a user turn ran, so
+            // this is effectively first-turn-anchored and harmless to re-run.
+            if stop_reason.as_str() == "end_turn" {
+                if let Some(user_text) = first_user_text {
+                    let db_for_title = db_conn.clone();
+                    let emitter_for_title = emitter.clone();
+                    let assistant_text = last_text.clone().unwrap_or_default();
+                    tokio::spawn(async move {
+                        crate::title_gen::maybe_generate_and_apply_title(
+                            &db_for_title,
+                            &emitter_for_title,
+                            cid,
+                            user_text,
+                            assistant_text,
+                        )
+                        .await;
+                    });
+                }
             }
 
             // If this conversation was spawned by a delegation, resolve the
