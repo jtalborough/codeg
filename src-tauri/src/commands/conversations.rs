@@ -807,6 +807,31 @@ pub async fn get_folder_conversation_with_live_core(
         }
     }
 
+    // Opening a finished-but-unseen conversation marks it seen: clear the
+    // `pending_review` "unread" dot → `completed`. CAS so it only fires on the
+    // first open and never disturbs in_progress / cancelled. Broadcast an upsert
+    // so every client's sidebar dot clears live. The MCP / session-info path
+    // calls `_core` directly, so this never fires for non-interactive parses.
+    if detail.summary.status == "pending_review" {
+        match conversation_service::update_status_if(
+            conn,
+            conversation_id,
+            conversation::ConversationStatus::PendingReview,
+            conversation::ConversationStatus::Completed,
+        )
+        .await
+        {
+            Ok(true) => {
+                detail.summary.status = "completed".to_string();
+                emit_conversation_upsert(emitter, conn, conversation_id).await;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!("[conversations] mark-seen failed for {conversation_id}: {e}")
+            }
+        }
+    }
+
     if let Some((pending, started_at)) = manager
         .pending_user_message_for_conversation(conversation_id)
         .await
