@@ -70,7 +70,76 @@ fn merge_agent_env(
         merged.insert(key, value);
     }
 
+    // Ensure agent-invoked `officecli …` (from an enabled office skill) resolves
+    // even when codeg installed the binary outside the user's shell PATH — the
+    // Windows self-managed dir, or `~/.local/bin` under a GUI launch.
+    prepend_officecli_path(&mut merged);
+
     merged.into_iter().collect()
+}
+
+/// Prepend `dir` to the PATH entry of `env`, seeding from `fallback_path` when
+/// `env` has no PATH key of its own. Removes any pre-existing PATH key first
+/// (case-insensitively when `windows`, since Windows env keys are
+/// case-insensitive) so the result has exactly one PATH entry — otherwise a
+/// differently-cased duplicate (e.g. an inherited `Path` plus an inserted
+/// `PATH`) could clobber the injected value when the child `Command` applies
+/// them. Pure (no env/fs access) so it is unit-tested for both platforms.
+fn prepend_dir_to_path_env(
+    env: &mut BTreeMap<String, String>,
+    dir: &str,
+    fallback_path: &str,
+    windows: bool,
+) {
+    let sep = if windows { ';' } else { ':' };
+    // Collect every PATH-ish key. `BTreeMap` iterates sorted, so when several
+    // differently-cased keys exist (e.g. both `Path` and `PATH`), the last is
+    // the one the child `Command` applies last — i.e. the effective value under
+    // Windows' case-insensitive env. Remove all of them so exactly one PATH
+    // entry remains; a stale duplicate could otherwise overwrite the injected
+    // value when the child applies them in order.
+    let matching: Vec<String> = env
+        .keys()
+        .filter(|k| {
+            if windows {
+                k.eq_ignore_ascii_case("PATH")
+            } else {
+                k.as_str() == "PATH"
+            }
+        })
+        .cloned()
+        .collect();
+    let mut existing_val: Option<String> = None;
+    for k in &matching {
+        existing_val = env.remove(k);
+    }
+    let existing_val = existing_val.unwrap_or_else(|| fallback_path.to_string());
+    let new_path = if existing_val.is_empty() {
+        dir.to_string()
+    } else {
+        format!("{dir}{sep}{existing_val}")
+    };
+    // Reuse the effective (last-sorted) key's casing when present; otherwise
+    // default to the platform-conventional name (`Path` on Windows, `PATH` on Unix).
+    let key = matching
+        .into_iter()
+        .next_back()
+        .unwrap_or_else(|| if windows { "Path" } else { "PATH" }.to_string());
+    env.insert(key, new_path);
+}
+
+/// Prepend codeg's known OfficeCLI install dir to `env`'s PATH when officecli is
+/// installed there but not yet on the live PATH (see
+/// `office_tools::officecli_agent_path_dir`). Applied to both the agent process
+/// env (`merge_agent_env`) and the ACP terminal runtime's base env, so an
+/// agent-invoked `officecli` resolves whether the agent execs it directly or
+/// runs it through the client `terminal/create` tool. PATH-only: never forwards
+/// model/API secrets.
+fn prepend_officecli_path(env: &mut BTreeMap<String, String>) {
+    if let Some(dir) = crate::commands::office_tools::officecli_agent_path_dir() {
+        let fallback = std::env::var("PATH").unwrap_or_default();
+        prepend_dir_to_path_env(env, &dir.to_string_lossy(), &fallback, cfg!(windows));
+    }
 }
 
 /// Commands sent from Tauri command handlers to the ACP connection loop.
@@ -202,6 +271,37 @@ fn codex_app_server_log_dir() -> Option<String> {
     Some(dir.to_string_lossy().into_owned())
 }
 
+/// Pi runs through pi-acp, which spawns the actual `pi` binary at runtime. If
+/// `pi` (or the BYO-pi `PI_ACP_PI_COMMAND` override) isn't resolvable, pi-acp
+/// dies mid-connection with a raw ENOENT. This preflight resolves the effective
+/// command up front against the same `PATH` the child inherits and returns a
+/// clear message when it can't be found; `None` means launch may proceed.
+///
+/// The message contains the literal substring "is not installed", which the
+/// frontend matches to show the localized SDK-missing prompt with an "Open Agent
+/// Settings" action (see `src/contexts/acp-connections-context.tsx`). Do not
+/// change that substring.
+fn pi_launch_preflight(runtime_env: &BTreeMap<String, String>) -> Option<String> {
+    let custom = runtime_env
+        .get("PI_ACP_PI_COMMAND")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let command = custom.unwrap_or("pi");
+    if crate::commands::acp::resolve_pi_command_path(command).is_some() {
+        return None;
+    }
+    Some(match custom {
+        Some(cmd) => format!(
+            "Pi is not installed: the custom pi command \"{cmd}\" was not found. \
+             Update it in Agent Settings → Pi → Runtime."
+        ),
+        None => "Pi is not installed. Install it with: \
+                 npm install -g @earendil-works/pi-coding-agent \
+                 (or set a custom pi command in Agent Settings → Pi → Runtime)."
+            .to_string(),
+    })
+}
+
 async fn build_agent(
     agent_type: AgentType,
     runtime_env: &BTreeMap<String, String>,
@@ -212,6 +312,21 @@ async fn build_agent(
 
     let agent = match meta.distribution {
         AgentDistribution::Npx { cmd, args, env, .. } => {
+            // pi-acp spawns the real `pi` binary; fail fast with a clear,
+            // install-prompt-routable error if it (or a BYO-pi override) isn't
+            // resolvable, rather than letting pi-acp die mid-connection on a raw
+            // ENOENT that surfaces as an opaque protocol error.
+            if agent_type == AgentType::Pi {
+                if let Some(message) = pi_launch_preflight(runtime_env) {
+                    return Err(AcpError::SdkNotInstalled(message));
+                }
+                // Trust the workspace codeg is launching pi into (default on, via
+                // the PI_ACP_TRUST_WORKSPACE env_json key) so pi loads the
+                // project's local config/skills without a redundant prompt. Gates
+                // config loading only, never execution; scoped, additive, and
+                // best-effort (never blocks the connect).
+                crate::commands::acp::seed_pi_workspace_trust(cwd, runtime_env);
+            }
             let mut merged_env = merge_agent_env(env, runtime_env);
             // codex-acp 1.0.0 honors APP_SERVER_LOGS as a directory for its
             // adapter-side logs. Surface it only under CODEG_ACP_DEBUG so
@@ -564,11 +679,16 @@ pub async fn spawn_agent_connection(
     // `terminal/create` tool authenticate via the same helper path the
     // agent process uses, while keeping unrelated secrets scoped to the
     // agent and out of arbitrary shell commands it runs.
-    let terminal_base_env: BTreeMap<String, String> = runtime_env
+    let mut terminal_base_env: BTreeMap<String, String> = runtime_env
         .iter()
         .filter(|(k, _)| k.starts_with("GIT_CONFIG_"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    // Also surface a codeg-installed OfficeCLI on the terminal's PATH: agents run
+    // office skills' `officecli …` through this `terminal/create` tool, not as a
+    // child of the agent process, so the agent-env injection alone wouldn't reach
+    // them right after install (before install.ps1's User-PATH change lands).
+    prepend_officecli_path(&mut terminal_base_env);
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<ConnectionCommand>(32);
     let conn_id = connection_id.clone();
@@ -1029,6 +1149,19 @@ async fn send_resume_session(
     serde_json::from_value(raw_response).map_err(|e| {
         sacp::util::internal_error(format!("Failed to parse resume response: {e}"))
     })
+}
+
+/// Whether MCP servers forwarded over the ACP wire (`session/new.mcpServers`)
+/// actually reach the agent's model. Almost all adapters deliver them; pi-acp
+/// (0.0.31) accepts the `mcpServers` field but DROPS it — it never forwards MCP
+/// to the inner `pi --mode rpc` process, and pi has no native MCP. So forwarding
+/// either user servers or the built-in codeg-mcp companion to pi is futile, and
+/// injecting codeg-mcp would falsely mark delegation/feedback/ask as available
+/// (`feedback_tool_available`, a registered delegation token pi can never use).
+/// `supports_mcp` stays `true` for pi (session/new tolerates the field), so this
+/// is a separate, narrower gate. Gate codeg-mcp injection on it.
+fn agent_delivers_wire_mcp(agent_type: AgentType) -> bool {
+    !matches!(agent_type, AgentType::Pi)
 }
 
 /// Load MCP servers configured for `agent_type` and convert them into the
@@ -1678,7 +1811,7 @@ async fn run_connection(
             // filter needed. The returned token is stashed on the session
             // state so connection teardown can revoke it. Skipped entirely
             // for agents that don't accept MCP over the wire (above).
-            let delegate_injection = if agent_supports_mcp {
+            let delegate_injection = if agent_supports_mcp && agent_delivers_wire_mcp(agent_type) {
                 if let Some(inj) = delegation_injection.as_ref() {
                     inject_codeg_mcp(&mut mcp_servers, inj, &conn_id, &cwd).await
                 } else {
@@ -4687,6 +4820,97 @@ async fn emit_conversation_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_preflight_flags_missing_custom_command() {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "PI_ACP_PI_COMMAND".to_string(),
+            "/nonexistent/definitely-not-pi-xyz".to_string(),
+        );
+        let msg =
+            pi_launch_preflight(&env).expect("an unresolvable custom pi command must be flagged");
+        // Frontend invariant: routes to the localized SDK-missing install prompt.
+        assert!(msg.contains("is not installed"), "got: {msg}");
+        assert!(msg.contains("definitely-not-pi-xyz"), "got: {msg}");
+    }
+
+    #[test]
+    fn pi_preflight_accepts_resolvable_custom_command() {
+        // A binary we know exists and is executable on this platform — proves the
+        // preflight clears (returns None) for a resolvable PI_ACP_PI_COMMAND.
+        let existing = if cfg!(windows) {
+            "C:\\Windows\\System32\\cmd.exe"
+        } else {
+            "/bin/sh"
+        };
+        let mut env = BTreeMap::new();
+        env.insert("PI_ACP_PI_COMMAND".to_string(), existing.to_string());
+        assert!(pi_launch_preflight(&env).is_none());
+    }
+
+    #[test]
+    fn prepend_path_unix_prepends_and_keeps_single_key() {
+        let mut env = BTreeMap::new();
+        env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+        prepend_dir_to_path_env(&mut env, "/home/u/.local/bin", "/fallback", false);
+        assert_eq!(env.get("PATH").unwrap(), "/home/u/.local/bin:/usr/bin:/bin");
+        assert_eq!(env.keys().filter(|k| k.as_str() == "PATH").count(), 1);
+    }
+
+    #[test]
+    fn prepend_path_unix_seeds_from_fallback_when_absent() {
+        let mut env = BTreeMap::new();
+        prepend_dir_to_path_env(&mut env, "/x/bin", "/usr/bin:/bin", false);
+        assert_eq!(env.get("PATH").unwrap(), "/x/bin:/usr/bin:/bin");
+    }
+
+    #[test]
+    fn prepend_path_windows_is_case_insensitive_and_no_clobber() {
+        // Regression for the `Path` vs `PATH` clobber: a pre-existing `Path`
+        // must be reused (not joined by a second `PATH` key that a later
+        // case-insensitive `Command::env` could overwrite).
+        let mut env = BTreeMap::new();
+        env.insert("Path".to_string(), r"C:\Windows".to_string());
+        prepend_dir_to_path_env(
+            &mut env,
+            r"C:\Users\u\AppData\Local\OfficeCLI",
+            "ignored-fallback",
+            true,
+        );
+        // Exactly one PATH-ish key, the original casing preserved, value prepended.
+        let path_keys: Vec<&String> =
+            env.keys().filter(|k| k.eq_ignore_ascii_case("PATH")).collect();
+        assert_eq!(path_keys.len(), 1, "{env:?}");
+        assert_eq!(
+            env.get("Path").unwrap(),
+            r"C:\Users\u\AppData\Local\OfficeCLI;C:\Windows"
+        );
+    }
+
+    #[test]
+    fn prepend_path_windows_seeds_from_fallback_with_semicolon() {
+        let mut env = BTreeMap::new();
+        prepend_dir_to_path_env(&mut env, r"C:\OfficeCLI", r"C:\Windows;C:\Windows\System32", true);
+        // No prior key → default `Path` casing on Windows.
+        assert_eq!(env.get("Path").unwrap(), r"C:\OfficeCLI;C:\Windows;C:\Windows\System32");
+    }
+
+    #[test]
+    fn prepend_path_windows_collapses_duplicate_casings() {
+        // Pathological but possible: both `PATH` and `Path` present. All
+        // PATH-ish keys must collapse to exactly one, prepended onto the
+        // effective (last-applied → `Path`) value, so no stale duplicate can
+        // overwrite the injected dir when the child Command applies env.
+        let mut env = BTreeMap::new();
+        env.insert("PATH".to_string(), r"C:\a".to_string());
+        env.insert("Path".to_string(), r"C:\b".to_string());
+        prepend_dir_to_path_env(&mut env, r"C:\OfficeCLI", "ignored-fallback", true);
+        let path_keys: Vec<&String> =
+            env.keys().filter(|k| k.eq_ignore_ascii_case("PATH")).collect();
+        assert_eq!(path_keys.len(), 1, "exactly one PATH-ish key must remain: {env:?}");
+        assert_eq!(env.get("Path").unwrap(), r"C:\OfficeCLI;C:\b");
+    }
 
     #[test]
     fn claude_raw_sdk_meta_enabled_only_for_claude() {
