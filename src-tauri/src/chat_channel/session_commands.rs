@@ -482,11 +482,8 @@ pub async fn handle_message(
                         Some(connection_id),
                     )
                     .await;
-                    return RichMessage::info(format!(
-                        "[{}] #{} @ {}",
-                        conv.agent_type, conv.id, folder.name
-                    ))
-                    .with_title(i18n::session_resumed_title(lang));
+                    // Silent resume — the chat shows only the agent's reply.
+                    return RichMessage::silent();
                 }
             }
         }
