@@ -250,7 +250,10 @@ fn is_markdown_whitespace(c: char) -> bool {
 /// lets a backslash escape whitespace, so `\` + whitespace ENDS (not extends) a
 /// label/destination scan — only `\` + a non-whitespace char is a real escape.
 fn reference_escapes_next(chars: &[char], k: usize) -> bool {
-    chars.get(k) == Some(&'\\') && chars.get(k + 1).is_some_and(|c| !is_markdown_whitespace(*c))
+    chars.get(k) == Some(&'\\')
+        && chars
+            .get(k + 1)
+            .is_some_and(|c| !is_markdown_whitespace(*c))
 }
 
 /// If a well-formed `(destination)` begins at `start`, return the index just
@@ -366,12 +369,105 @@ pub fn fold_reference_links(text: &str) -> String {
     out
 }
 
-/// Derive a conversation title from a user's first message: fold inline
-/// reference links to their labels, then cap the length. Folding first ensures a
-/// `[name](file://<long path>)` mention becomes `name` instead of a raw — and,
-/// once truncated, unterminable — Markdown link.
+/// The first non-blank line of `text` that isn't a fenced-code delimiter, with
+/// its surrounding whitespace trimmed. A first message that opens with a code
+/// block (```` ``` ````/`~~~`) or blank lines would otherwise yield a title of
+/// "```rust" or "" — skip those so the title reflects the user's prose. Falls
+/// back to the trimmed whole text when every line is blank or a fence marker.
+fn first_meaningful_line(text: &str) -> &str {
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("```") || line.starts_with("~~~") {
+            continue;
+        }
+        return line;
+    }
+    text.trim()
+}
+
+/// Drop a leading ordered-list marker (`1.`/`2)` …) followed by a space,
+/// returning the remainder; `None` when `s` doesn't start with one. Requires the
+/// trailing space so prose like `3 apples` or a version like `1.5x` is left
+/// intact.
+fn strip_ordered_list_marker(s: &str) -> Option<&str> {
+    let digits_end = s.find(|c: char| !c.is_ascii_digit())?;
+    if digits_end == 0 {
+        return None;
+    }
+    let rest = &s[digits_end..];
+    let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
+    rest.strip_prefix(' ').map(str::trim_start)
+}
+
+/// Strip leading Markdown block markers — ATX heading hashes (`#`..`######`),
+/// blockquote `>`, and unordered (`-`/`*`/`+`) or ordered (`1.`) list markers —
+/// so a first message like `## Fix the bug` or `- refactor parser` yields a
+/// prose title. Each marker must be followed by a space to count, so `#tag`,
+/// `*emphasis*`, and `1.5x` are untouched. Applied repeatedly to peel nested
+/// markers (e.g. `> - item`).
+fn strip_leading_block_markers(line: &str) -> &str {
+    let mut s = line.trim_start();
+    loop {
+        let before = s;
+        if s.starts_with('#') {
+            let hashes = s.len() - s.trim_start_matches('#').len();
+            if hashes <= 6 {
+                if let Some(after) = s[hashes..].strip_prefix(' ') {
+                    s = after.trim_start();
+                }
+            }
+        }
+        if let Some(rest) = s.strip_prefix('>') {
+            s = rest.trim_start();
+        } else if let Some(rest) = s
+            .strip_prefix("- ")
+            .or_else(|| s.strip_prefix("* "))
+            .or_else(|| s.strip_prefix("+ "))
+        {
+            s = rest.trim_start();
+        } else if let Some(rest) = strip_ordered_list_marker(s) {
+            s = rest;
+        }
+        if s == before {
+            break;
+        }
+    }
+    s
+}
+
+/// Truncate a derived title to `max_len` characters. Unlike [`truncate_str`],
+/// back off to the last word boundary within the window so a space-separated
+/// language isn't sliced mid-word — but only when that boundary keeps at least
+/// half the window, so CJK text (no spaces, or a lone early space) still
+/// hard-cuts exactly as before.
+fn truncate_title(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        return s.to_string();
+    }
+    let head: Vec<char> = s.chars().take(max_len).collect();
+    let kept: String = match head
+        .iter()
+        .rposition(|c| c.is_whitespace())
+        .filter(|&i| i >= max_len / 2)
+    {
+        Some(i) => head[..i].iter().collect(),
+        None => head.iter().collect(),
+    };
+    format!("{}...", kept.trim_end())
+}
+
+/// Derive a conversation title from a user's first message. Folding inline
+/// reference links first ensures a `[name](file://<long path>)` mention becomes
+/// `name` instead of a raw — and, once truncated, unterminable — Markdown link.
+/// We then take the first meaningful line, strip leading Markdown block markers,
+/// collapse internal whitespace to single spaces, and cap the length on a word
+/// boundary — so a multi-line message, a heading/list bullet, or a leading code
+/// block yields a tidy single-line title rather than the raw first 100 chars.
 pub fn title_from_user_text(text: &str) -> String {
-    truncate_str(&fold_reference_links(text), 100)
+    let folded = fold_reference_links(text);
+    let line = strip_leading_block_markers(first_meaningful_line(&folded));
+    let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_title(&normalized, 100)
 }
 
 /// Aggregate turn-level usage and duration into a single `SessionStats`.
@@ -1137,10 +1233,63 @@ mod tests {
 
     #[test]
     fn title_from_user_text_still_caps_plain_prose() {
+        // A run with no word boundary (and CJK, which has none) hard-cuts at the
+        // 100-char window exactly as before.
         let long = "x".repeat(250);
         let title = title_from_user_text(&long);
         assert_eq!(title.chars().count(), 103); // 100 + "..."
         assert!(title.ends_with("..."));
+    }
+
+    #[test]
+    fn title_from_user_text_uses_first_meaningful_line() {
+        // A multi-line message collapses to its first prose line, not a title
+        // with embedded newlines.
+        assert_eq!(
+            title_from_user_text("Fix the login bug\n\nIt throws on empty passwords."),
+            "Fix the login bug"
+        );
+        // Leading blank lines and a fenced code block are skipped.
+        assert_eq!(
+            title_from_user_text("\n```rust\nfn main() {}\n```\nmake this compile"),
+            "fn main() {}"
+        );
+        // Internal runs of whitespace/tabs collapse to single spaces.
+        assert_eq!(
+            title_from_user_text("add   a\tretry  loop"),
+            "add a retry loop"
+        );
+    }
+
+    #[test]
+    fn title_from_user_text_strips_markdown_block_markers() {
+        assert_eq!(title_from_user_text("## Fix the bug"), "Fix the bug");
+        assert_eq!(
+            title_from_user_text("- refactor the parser"),
+            "refactor the parser"
+        );
+        assert_eq!(
+            title_from_user_text("1. write the migration"),
+            "write the migration"
+        );
+        assert_eq!(title_from_user_text("> quote then ask"), "quote then ask");
+        // A marker without a trailing space is ordinary prose, left intact.
+        assert_eq!(title_from_user_text("#hashtag only"), "#hashtag only");
+        assert_eq!(
+            title_from_user_text("1.5x faster please"),
+            "1.5x faster please"
+        );
+    }
+
+    #[test]
+    fn title_from_user_text_truncates_on_word_boundary() {
+        // 120 chars of spaced words: cut backs off to a space (no mid-word
+        // slice) and never exceeds the 100-char window.
+        let long = "alpha ".repeat(20); // "alpha alpha …", 120 chars
+        let title = title_from_user_text(&long);
+        assert!(title.ends_with("..."));
+        assert!(!title.contains("alph...")); // no word was sliced
+        assert!(title.trim_end_matches("...").chars().count() <= 100);
     }
 
     #[test]
